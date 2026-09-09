@@ -2,34 +2,31 @@ import os
 import logging
 from flask import Flask, request, jsonify
 import requests
-from google import genai
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-ADMIN_IDS = {8280167872}
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-MODEL = "gemini-2.5-flash"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 SYSTEM_PROMPT = """You are Keshav Study Bot for Rajasthan University students.
 Answer in clear Hindi/Hinglish. Help with Uniraj exams, results, dates, fees, marks, semester, timetable, admission and study questions.
-Never invent official university dates or notices. If current official information is not available in the supplied context, clearly say that it should be verified on the official Uniraj website.
+Never invent official university dates or notices. If current official information is not available, clearly say it should be verified on the official Uniraj website.
 Keep answers useful, concise and well formatted with emojis when appropriate."""
 
 
 def send_message(chat_id, text, reply_markup=None):
     payload = {
         "chat_id": chat_id,
-        "text": text[:4096],
+        "text": str(text)[:4096],
         "disable_web_page_preview": True,
     }
     if reply_markup:
@@ -40,15 +37,38 @@ def send_message(chat_id, text, reply_markup=None):
 
 
 def ai_reply(user_text):
+    """Call Gemini directly through its REST API for reliable Render deployment."""
     prompt = f"{SYSTEM_PROMPT}\n\nStudent's question:\n{user_text}"
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.4,
+            "maxOutputTokens": 800,
+        },
+    }
+
+    r = requests.post(
+        GEMINI_URL,
+        params={"key": GEMINI_API_KEY},
+        json=payload,
+        timeout=45,
     )
-    text = getattr(response, "text", None)
+
+    if not r.ok:
+        logging.error("Gemini API error %s: %s", r.status_code, r.text[:1000])
+        raise RuntimeError(f"Gemini API returned HTTP {r.status_code}")
+
+    data = r.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        logging.error("Gemini returned no candidates: %s", data)
+        raise RuntimeError("Gemini returned no answer")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts).strip()
     if not text:
-        return "❌ अभी AI जवाब नहीं बना पाया। कृपया थोड़ी देर बाद फिर कोशिश करें।"
-    return text.strip()
+        raise RuntimeError("Gemini returned empty text")
+    return text
 
 
 def menu_keyboard():
@@ -86,7 +106,6 @@ def answer_callback(data):
 
 
 def configure_webhook():
-    """Automatically point Telegram updates to this Render service."""
     render_url = os.getenv("RENDER_EXTERNAL_URL")
     if not render_url:
         logging.info("RENDER_EXTERNAL_URL not available; webhook not auto-configured")
@@ -109,7 +128,7 @@ configure_webhook()
 
 @app.get("/")
 def health():
-    return jsonify({"ok": True, "service": "Keshav Study Bot", "status": "running", "ai": "Gemini"})
+    return jsonify({"ok": True, "service": "Keshav Study Bot", "status": "running", "ai": "Gemini REST"})
 
 
 @app.post("/telegram/webhook")
@@ -121,7 +140,11 @@ def webhook():
             chat_id = cb["message"]["chat"]["id"]
             text = answer_callback(cb.get("data", ""))
             send_message(chat_id, text)
-            requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb["id"]}, timeout=10)
+            requests.post(
+                f"{TELEGRAM_API}/answerCallbackQuery",
+                json={"callback_query_id": cb["id"]},
+                timeout=10,
+            )
             return jsonify({"ok": True})
 
         message = update.get("message") or {}
@@ -140,8 +163,22 @@ def webhook():
             send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
 
-        # Admin can use the same Gemini AI chat as regular users.
-        reply = ai_reply(text)
+        # Send a typing indicator while Gemini is generating the answer.
+        try:
+            requests.post(
+                f"{TELEGRAM_API}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+        try:
+            reply = ai_reply(text)
+        except Exception as ai_error:
+            logging.exception("AI reply failed")
+            reply = "❌ अभी AI service से जवाब नहीं मिल पाया।\n\nकृपया थोड़ी देर बाद फिर कोशिश करें। अगर समस्या बनी रहे तो Admin को बताएं।"
+
         send_message(chat_id, reply)
         return jsonify({"ok": True})
     except Exception:
