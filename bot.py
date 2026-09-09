@@ -2,22 +2,23 @@ import os
 import logging
 from flask import Flask, request, jsonify
 import requests
-from openai import OpenAI
+from google import genai
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_IDS = {8280167872}
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is missing")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+MODEL = "gemini-2.5-flash"
 
 SYSTEM_PROMPT = """You are Keshav Study Bot for Rajasthan University students.
 Answer in clear Hindi/Hinglish. Help with Uniraj exams, results, dates, fees, marks, semester, timetable, admission and study questions.
@@ -25,45 +26,29 @@ Never invent official university dates or notices. If current official informati
 Keep answers useful, concise and well formatted with emojis when appropriate."""
 
 
-def configure_telegram_webhook():
-    """Automatically point Telegram to this Render service after deployment."""
-    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    if not base_url:
-        logging.info("RENDER_EXTERNAL_URL not set; webhook auto-configuration skipped")
-        return
-    webhook_url = f"{base_url}/telegram/webhook"
-    try:
-        response = requests.post(
-            f"{TELEGRAM_API}/setWebhook",
-            json={"url": webhook_url, "drop_pending_updates": True},
-            timeout=20,
-        )
-        response.raise_for_status()
-        logging.info("Telegram webhook configured: %s", webhook_url)
-    except Exception:
-        logging.exception("Could not configure Telegram webhook")
-
-
-def send_message(chat_id, text):
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", json={
+def send_message(chat_id, text, reply_markup=None):
+    payload = {
         "chat_id": chat_id,
         "text": text[:4096],
         "disable_web_page_preview": True,
-    }, timeout=20)
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
 def ai_reply(user_text):
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
-        temperature=0.3,
+    prompt = f"{SYSTEM_PROMPT}\n\nStudent's question:\n{user_text}"
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
     )
-    return response.choices[0].message.content.strip()
+    text = getattr(response, "text", None)
+    if not text:
+        return "❌ अभी AI जवाब नहीं बना पाया। कृपया थोड़ी देर बाद फिर कोशिश करें।"
+    return text.strip()
 
 
 def menu_keyboard():
@@ -102,7 +87,7 @@ def answer_callback(data):
 
 @app.get("/")
 def health():
-    return jsonify({"ok": True, "service": "Keshav Study Bot", "status": "running"})
+    return jsonify({"ok": True, "service": "Keshav Study Bot", "status": "running", "ai": "Gemini"})
 
 
 @app.post("/telegram/webhook")
@@ -130,12 +115,7 @@ def webhook():
 
         if text.startswith("/start"):
             welcome = "🎓 Keshav Study Bot में आपका स्वागत है!\n\nRajasthan University की पढ़ाई और updates के लिए अपना सवाल भेजें या नीचे menu चुनें।"
-            requests.post(f"{TELEGRAM_API}/sendMessage", json={
-                "chat_id": chat_id,
-                "text": welcome,
-                "reply_markup": menu_keyboard(),
-                "disable_web_page_preview": True,
-            }, timeout=20).raise_for_status()
+            send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
 
         if user.get("id") in ADMIN_IDS:
@@ -149,8 +129,6 @@ def webhook():
         logging.exception("Telegram webhook error")
         return jsonify({"ok": False}), 500
 
-
-configure_telegram_webhook()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
