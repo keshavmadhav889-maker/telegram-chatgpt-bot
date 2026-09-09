@@ -140,10 +140,7 @@ def webhook():
             send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
 
-        if user.get("id") in ADMIN_IDS:
-            send_message(chat_id, "👑 Admin mode active.")
-            return jsonify({"ok": True})
-
+        # Admin can use the same Gemini AI chat as regular users.
         reply = ai_reply(text)
         send_message(chat_id, reply)
         return jsonify({"ok": True})
