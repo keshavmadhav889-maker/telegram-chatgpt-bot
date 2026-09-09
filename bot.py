@@ -25,6 +25,25 @@ Never invent official university dates or notices. If current official informati
 Keep answers useful, concise and well formatted with emojis when appropriate."""
 
 
+def configure_telegram_webhook():
+    """Automatically point Telegram to this Render service after deployment."""
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not base_url:
+        logging.info("RENDER_EXTERNAL_URL not set; webhook auto-configuration skipped")
+        return
+    webhook_url = f"{base_url}/telegram/webhook"
+    try:
+        response = requests.post(
+            f"{TELEGRAM_API}/setWebhook",
+            json={"url": webhook_url, "drop_pending_updates": True},
+            timeout=20,
+        )
+        response.raise_for_status()
+        logging.info("Telegram webhook configured: %s", webhook_url)
+    except Exception:
+        logging.exception("Could not configure Telegram webhook")
+
+
 def send_message(chat_id, text):
     r = requests.post(f"{TELEGRAM_API}/sendMessage", json={
         "chat_id": chat_id,
@@ -130,6 +149,8 @@ def webhook():
         logging.exception("Telegram webhook error")
         return jsonify({"ok": False}), 500
 
+
+configure_telegram_webhook()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
