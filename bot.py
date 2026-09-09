@@ -1,13 +1,15 @@
 import os
 import logging
+import time
 from flask import Flask, request, jsonify
 import requests
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
+GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
@@ -15,7 +17,7 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 SYSTEM_PROMPT = """You are Keshav Study Bot for Rajasthan University students.
 Answer in clear Hindi/Hinglish. Help with Uniraj exams, results, dates, fees, marks, semester, timetable, admission and study questions.
@@ -39,35 +41,71 @@ def send_message(chat_id, text, reply_markup=None):
 def ai_reply(user_text):
     prompt = f"{SYSTEM_PROMPT}\n\nStudent's question:\n{user_text}"
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.4,
             "maxOutputTokens": 800,
         },
     }
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
 
-    # Use Google's current API-key header authentication.
-    # This is preferred over putting the key in the URL.
-    r = requests.post(
-        GEMINI_URL,
-        headers={
-            "x-goog-api-key": GEMINI_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=45,
-    )
+    # Gemini recommends retrying transient 429/408/5xx errors, but not
+    # client/authentication errors such as 400/401/403.
+    last_response = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                GEMINI_URL,
+                headers=headers,
+                json=payload,
+                timeout=45,
+            )
+            last_response = r
+        except requests.RequestException as exc:
+            logging.exception("Gemini network error on attempt %s", attempt + 1)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"Gemini network error: {exc}") from exc
+
+        if r.ok:
+            break
+
+        if r.status_code in (408, 429, 500, 502, 503, 504) and attempt < 2:
+            logging.warning("Gemini transient error %s; retrying", r.status_code)
+            time.sleep(2 ** attempt)
+            continue
+        break
+
+    r = last_response
+    if r is None:
+        raise RuntimeError("Gemini request failed")
 
     if not r.ok:
         try:
             error_data = r.json().get("error", {})
             error_message = error_data.get("message", "Unknown Gemini API error")
+            error_status = error_data.get("status", "")
         except Exception:
             error_message = r.text[:500]
-        logging.error("Gemini API error %s: %s", r.status_code, error_message)
+            error_status = ""
+        logging.error(
+            "Gemini API error %s %s: %s",
+            r.status_code,
+            error_status,
+            error_message,
+        )
         raise RuntimeError(f"Gemini API {r.status_code}: {error_message}")
 
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError as exc:
+        logging.error("Gemini returned non-JSON response: %s", r.text[:500])
+        raise RuntimeError("Gemini returned invalid response") from exc
+
     candidates = data.get("candidates", [])
     if not candidates:
         logging.error("Gemini returned no candidates: %s", data)
@@ -137,7 +175,14 @@ configure_webhook()
 
 @app.get("/")
 def health():
-    return jsonify({"ok": True, "service": "Keshav Study Bot", "status": "running", "ai": "Gemini REST"})
+    return jsonify({
+        "ok": True,
+        "service": "Keshav Study Bot",
+        "status": "running",
+        "ai": "Gemini REST",
+        "model": GEMINI_MODEL,
+        "build": "2026-09-09-gemini-fix-2",
+    })
 
 
 @app.post("/telegram/webhook")
@@ -186,14 +231,19 @@ def webhook():
         except Exception as ai_error:
             logging.exception("AI reply failed")
             error_text = str(ai_error)
-            if " 401:" in error_text or " 403:" in error_text:
-                reply = "❌ Gemini API key में समस्या है।\n\nRender → Environment Variables में GEMINI_API_KEY की value check करें और फिर redeploy करें।"
+            if " 401:" in error_text:
+                reply = "❌ Gemini API key invalid/expired है। Render में GEMINI_API_KEY को सही key से replace करके Save & deploy करें।"
+            elif " 403:" in error_text:
+                reply = "❌ Gemini API key को इस API/model की permission नहीं मिल रही। Google AI Studio में नई API key बनाकर Render में GEMINI_API_KEY replace करें।"
             elif " 429:" in error_text:
-                reply = "⏳ Gemini की free quota/rate limit अभी पूरी हो गई है। थोड़ी देर बाद फिर कोशिश करें।"
+                reply = "⏳ Gemini quota/rate limit अभी पूरी है। थोड़ी देर बाद फिर कोशिश करें।"
             elif " 404:" in error_text:
-                reply = "❌ Gemini model/API उपलब्ध नहीं है। Render को latest code पर redeploy करें।"
+                reply = f"❌ Gemini model '{GEMINI_MODEL}' उपलब्ध नहीं मिला। Render में GEMINI_MODEL को gemini-2.5-flash रखें और redeploy करें।"
+            elif "network error" in error_text.lower():
+                reply = "❌ Render से Gemini तक network connection नहीं बन पा रहा। Render logs में Gemini network error देखें।"
             else:
-                reply = "❌ अभी AI service से जवाब नहीं मिल पाया। थोड़ी देर बाद फिर कोशिश करें।"
+                # Keep the useful HTTP status visible so the exact failure is diagnosable.
+                reply = f"❌ AI service error: {error_text[:220]}"
 
         send_message(chat_id, reply)
         return jsonify({"ok": True})
