@@ -37,7 +37,6 @@ def send_message(chat_id, text, reply_markup=None):
 
 
 def ai_reply(user_text):
-    """Call Gemini directly through its REST API for reliable Render deployment."""
     prompt = f"{SYSTEM_PROMPT}\n\nStudent's question:\n{user_text}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -47,16 +46,26 @@ def ai_reply(user_text):
         },
     }
 
+    # Use Google's current API-key header authentication.
+    # This is preferred over putting the key in the URL.
     r = requests.post(
         GEMINI_URL,
-        params={"key": GEMINI_API_KEY},
+        headers={
+            "x-goog-api-key": GEMINI_API_KEY,
+            "Content-Type": "application/json",
+        },
         json=payload,
         timeout=45,
     )
 
     if not r.ok:
-        logging.error("Gemini API error %s: %s", r.status_code, r.text[:1000])
-        raise RuntimeError(f"Gemini API returned HTTP {r.status_code}")
+        try:
+            error_data = r.json().get("error", {})
+            error_message = error_data.get("message", "Unknown Gemini API error")
+        except Exception:
+            error_message = r.text[:500]
+        logging.error("Gemini API error %s: %s", r.status_code, error_message)
+        raise RuntimeError(f"Gemini API {r.status_code}: {error_message}")
 
     data = r.json()
     candidates = data.get("candidates", [])
@@ -163,7 +172,6 @@ def webhook():
             send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
 
-        # Send a typing indicator while Gemini is generating the answer.
         try:
             requests.post(
                 f"{TELEGRAM_API}/sendChatAction",
@@ -177,7 +185,15 @@ def webhook():
             reply = ai_reply(text)
         except Exception as ai_error:
             logging.exception("AI reply failed")
-            reply = "❌ अभी AI service से जवाब नहीं मिल पाया।\n\nकृपया थोड़ी देर बाद फिर कोशिश करें। अगर समस्या बनी रहे तो Admin को बताएं।"
+            error_text = str(ai_error)
+            if " 401:" in error_text or " 403:" in error_text:
+                reply = "❌ Gemini API key में समस्या है।\n\nRender → Environment Variables में GEMINI_API_KEY की value check करें और फिर redeploy करें।"
+            elif " 429:" in error_text:
+                reply = "⏳ Gemini की free quota/rate limit अभी पूरी हो गई है। थोड़ी देर बाद फिर कोशिश करें।"
+            elif " 404:" in error_text:
+                reply = "❌ Gemini model/API उपलब्ध नहीं है। Render को latest code पर redeploy करें।"
+            else:
+                reply = "❌ अभी AI service से जवाब नहीं मिल पाया। थोड़ी देर बाद फिर कोशिश करें।"
 
         send_message(chat_id, reply)
         return jsonify({"ok": True})
