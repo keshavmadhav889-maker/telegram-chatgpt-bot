@@ -85,6 +85,28 @@ def answer_callback(data):
     return canned.get(data, "अपना सवाल भेजें।")
 
 
+def configure_webhook():
+    """Automatically point Telegram updates to this Render service."""
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not render_url:
+        logging.info("RENDER_EXTERNAL_URL not available; webhook not auto-configured")
+        return
+    webhook_url = render_url.rstrip("/") + "/telegram/webhook"
+    try:
+        r = requests.post(
+            f"{TELEGRAM_API}/setWebhook",
+            json={"url": webhook_url},
+            timeout=15,
+        )
+        r.raise_for_status()
+        logging.info("Telegram webhook configured: %s", webhook_url)
+    except Exception:
+        logging.exception("Failed to configure Telegram webhook")
+
+
+configure_webhook()
+
+
 @app.get("/")
 def health():
     return jsonify({"ok": True, "service": "Keshav Study Bot", "status": "running", "ai": "Gemini"})
