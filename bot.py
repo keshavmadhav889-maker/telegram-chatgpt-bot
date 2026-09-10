@@ -9,7 +9,11 @@ app = Flask(__name__)
 
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+
+# Gemini 2.5 Flash is no longer available to this API key.
+# Keep the production bot pinned to the current stable Gemini 3.6 Flash
+# instead of allowing an old Render GEMINI_MODEL variable to override it.
+GEMINI_MODEL = "gemini-3.6-flash"
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
@@ -43,7 +47,6 @@ def ai_reply(user_text):
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.4,
             "maxOutputTokens": 800,
         },
     }
@@ -52,8 +55,6 @@ def ai_reply(user_text):
         "Content-Type": "application/json",
     }
 
-    # Gemini recommends retrying transient 429/408/5xx errors, but not
-    # client/authentication errors such as 400/401/403.
     last_response = None
     for attempt in range(3):
         try:
@@ -73,17 +74,16 @@ def ai_reply(user_text):
 
         if r.ok:
             break
-
         if r.status_code in (408, 429, 500, 502, 503, 504) and attempt < 2:
             logging.warning("Gemini transient error %s; retrying", r.status_code)
             time.sleep(2 ** attempt)
             continue
         break
 
-    r = last_response
-    if r is None:
+    if last_response is None:
         raise RuntimeError("Gemini request failed")
 
+    r = last_response
     if not r.ok:
         try:
             error_data = r.json().get("error", {})
@@ -92,18 +92,12 @@ def ai_reply(user_text):
         except Exception:
             error_message = r.text[:500]
             error_status = ""
-        logging.error(
-            "Gemini API error %s %s: %s",
-            r.status_code,
-            error_status,
-            error_message,
-        )
+        logging.error("Gemini API error %s %s: %s", r.status_code, error_status, error_message)
         raise RuntimeError(f"Gemini API {r.status_code}: {error_message}")
 
     try:
         data = r.json()
     except ValueError as exc:
-        logging.error("Gemini returned non-JSON response: %s", r.text[:500])
         raise RuntimeError("Gemini returned invalid response") from exc
 
     candidates = data.get("candidates", [])
@@ -181,7 +175,7 @@ def health():
         "status": "running",
         "ai": "Gemini REST",
         "model": GEMINI_MODEL,
-        "build": "2026-09-09-gemini-fix-2",
+        "build": "2026-09-10-gemini-3.6-fix",
     })
 
 
@@ -232,17 +226,14 @@ def webhook():
             logging.exception("AI reply failed")
             error_text = str(ai_error)
             if " 401:" in error_text:
-                reply = "❌ Gemini API key invalid/expired है। Render में GEMINI_API_KEY को सही key से replace करके Save & deploy करें।"
+                reply = "❌ Gemini API key invalid/expired है। Render में GEMINI_API_KEY check करें।"
             elif " 403:" in error_text:
-                reply = "❌ Gemini API key को इस API/model की permission नहीं मिल रही। Google AI Studio में नई API key बनाकर Render में GEMINI_API_KEY replace करें।"
+                reply = "❌ Gemini API key को इस API/model की permission नहीं मिल रही। Google AI Studio की नई key Render में लगाएँ।"
             elif " 429:" in error_text:
                 reply = "⏳ Gemini quota/rate limit अभी पूरी है। थोड़ी देर बाद फिर कोशिश करें।"
             elif " 404:" in error_text:
-                reply = f"❌ Gemini model '{GEMINI_MODEL}' उपलब्ध नहीं मिला। Render में GEMINI_MODEL को gemini-2.5-flash रखें और redeploy करें।"
-            elif "network error" in error_text.lower():
-                reply = "❌ Render से Gemini तक network connection नहीं बन पा रहा। Render logs में Gemini network error देखें।"
+                reply = "❌ Gemini model उपलब्ध नहीं मिला। Render को latest GitHub commit पर redeploy करें।"
             else:
-                # Keep the useful HTTP status visible so the exact failure is diagnosable.
                 reply = f"❌ AI service error: {error_text[:220]}"
 
         send_message(chat_id, reply)
@@ -253,4 +244,4 @@ def webhook():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
