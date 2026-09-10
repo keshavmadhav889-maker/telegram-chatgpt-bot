@@ -19,44 +19,37 @@ if not GEMINI_API_KEY:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-# Lightweight per-process context. It helps the bot understand the menu a student just used.
+# Short-lived in-memory state. This keeps the conversation coherent between
+# consecutive Telegram messages without exposing or storing sensitive data.
 USER_CONTEXT = {}
+USER_HISTORY = {}
+MAX_HISTORY = 12
 
-OFFICIAL_UNIRAJ = "https://www.uniraj.ac.in/"
-OFFICIAL_RESULT = "https://result.uniraj.ac.in/"
-OFFICIAL_ADMISSION = "https://admissions.uniraj.ac.in/"
-OFFICIAL_SYLLABUS = "https://uniraj.ac.in/index.php?mid=3125"
-GUESS_CHANNEL_1 = "https://t.me/Uniraj_GuessPapers"
-GUESS_CHANNEL_2 = "https://t.me/Unirajguesspaper"
-RESULT_HELP_GROUP = "https://t.me/Unirajresult499"
+SYSTEM_PROMPT = """You are Uniraj Information Section, a professional Hindi-first study assistant for Rajasthan University (Uniraj) students.
 
-# Official University of Rajasthan B.Sc. Mathematics syllabus, session 2025-26.
-BSC_MATHS_SYLLABUS_PDF = "https://uniraj.ac.in/student/syl_N/UP_SYL_2025-26/Maths_UG0803_%28Maths_Group%29%20I%20to%20VI%202025-26%20%20SCiencee.pdf"
+You must behave like a real conversational assistant, not like a fresh chatbot on every message.
+- Understand Hindi, Hinglish, English, spelling mistakes, and short student messages.
+- REMEMBER the immediately previous conversation. If you asked the student a clarification question, interpret the student's next reply as the answer to that question.
+- NEVER ask again what the student wants when the previous assistant message already asked a specific question and the student answered it.
+- Do not restart with an introduction on every message.
+- Do not repeat the student's question.
+- Give a complete, direct answer.
+- If the message is genuinely incomplete and there is no useful context, ask only ONE short clarification question.
+- For current/official facts such as result dates, exam dates, fees, notices and syllabus, do not invent information. Use verified official information when available; otherwise clearly say it needs verification.
+- For study questions, explain concepts, formulas, notes, important topics and preparation clearly.
+- If a student asks for a syllabus, never create a fake syllabus. Only provide verified/current syllabus information or the official PDF when available.
+- If a student asks about a personal result, direct them to the official result portal or the configured Result Help service; never fabricate marks or a result.
+- If the student is unhappy with an answer, apologize briefly and offer the configured student-help group.
+- If asked who made the bot, say it was made/powered by KESHAV MADHAV.
+- If asked for guess papers, naturally mention that free guess papers are available through the configured Uniraj Guess Papers channels.
+- Keep answers concise but useful, with headings/bullets when helpful.
 
-SYSTEM_PROMPT = """You are Uniraj Information Section, a Hindi-first study assistant for University of Rajasthan students.
-
-Core rules:
-- Understand Hindi, Hinglish, English, spelling mistakes and short student messages.
-- Never start ordinary answers with a generic introduction. Answer the student's actual question directly.
-- Help with BSc, BA, BCom, MSc and other Uniraj study topics, semesters, exams, results, admission, fees, dates, marks, timetable and syllabus.
-- If course + semester + subject are supplied, use them explicitly.
-- Never invent an official result, syllabus, date, notice, fee or university fact.
-- For current/official information, only state what is verified or clearly say it must be checked against the official University source.
-- For academic/study questions, explain concepts, make notes, formulas, revision plans and practice questions.
-- If the request is genuinely incomplete, ask only one short clarification question.
-- If a student asks for a guess paper, tell them that free Uniraj guess papers/study material are available through the official study-resource channels listed by this bot.
-- If asked who made the bot, say it is powered by KESHAV MADHAV.
-- If the student is unhappy with an answer, politely offer the Uniraj result/help group for human/community help.
-- Never pretend that you personally fetched a student's marks unless a real result lookup was performed.
-- Never fabricate a PDF or claim an AI-generated syllabus is an official syllabus. Official syllabus PDFs must come from the University source.
-- Keep normal answers concise, useful and student-friendly.
-
-Official University sources:
+Official sources:
 Uniraj: https://www.uniraj.ac.in/
 Result: https://result.uniraj.ac.in/
 Admission: https://admissions.uniraj.ac.in/
-Syllabus: https://uniraj.ac.in/index.php?mid=3125
-"""
+
+Do not claim you checked a website unless verified information was actually supplied to you."""
 
 
 def send_message(chat_id, text, reply_markup=None):
@@ -72,57 +65,31 @@ def send_message(chat_id, text, reply_markup=None):
     return r.json()
 
 
-def send_document(chat_id, document_url, caption):
-    payload = {
-        "chat_id": chat_id,
-        "document": document_url,
-        "caption": caption[:1024],
-    }
-    r = requests.post(f"{TELEGRAM_API}/sendDocument", json=payload, timeout=45)
-    r.raise_for_status()
-    return r.json()
+def ai_reply(user_text, chat_id, menu_context=""):
+    history = USER_HISTORY.get(chat_id, [])
+    context_line = f"\n\nRecently selected menu: {menu_context}" if menu_context else ""
 
+    history_text = ""
+    for role, text in history[-MAX_HISTORY:]:
+        history_text += f"{role}: {text}\n"
 
-def resource_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "📚 Free Guess Papers", "url": GUESS_CHANNEL_1}],
-            [{"text": "📚 More Study Material", "url": GUESS_CHANNEL_2}],
-        ]
-    }
+    prompt = f"""{SYSTEM_PROMPT}{context_line}
 
+Conversation so far:
+{history_text}
+Student's latest message:
+{user_text}
 
-def result_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "🔎 Official Result Portal", "url": OFFICIAL_RESULT}],
-            [{"text": "📲 Result Help Group", "url": RESULT_HELP_GROUP}],
-        ]
-    }
+Answer the latest message using the conversation context. If the previous assistant asked a question and this message is the student's answer, continue from that exact point. Do not ask 'aapko kya chahiye?' again unless the student's latest message is actually unrelated or incomplete."""
 
-
-def main_keyboard():
-    return {
-        "inline_keyboard": [
-            [{"text": "📌 आज के अपडेट", "callback_data": "today"}, {"text": "📝 Exam", "callback_data": "exam"}],
-            [{"text": "🏆 Result", "callback_data": "result"}, {"text": "📚 Syllabus", "callback_data": "syllabus"}],
-            [{"text": "🎓 Admission", "callback_data": "admission"}, {"text": "📅 Dates", "callback_data": "dates"}],
-            [{"text": "📊 Marks", "callback_data": "marks"}, {"text": "🗓 Semester Hub", "callback_data": "semester"}],
-            [{"text": "🕐 Time Table", "callback_data": "timetable"}, {"text": "🤖 Ask AI", "callback_data": "ask"}],
-            [{"text": "📚 Free Study", "callback_data": "study"}, {"text": "ℹ️ Help", "callback_data": "help"}],
-            [{"text": "🔗 Official Sources", "callback_data": "official"}, {"text": "👨‍💻 Bot Info", "callback_data": "about"}],
-        ]
-    }
-
-
-def ai_reply(user_text, menu_context=""):
-    context_line = f"\n\nThe student recently selected this menu: {menu_context}" if menu_context else ""
-    prompt = f"{SYSTEM_PROMPT}{context_line}\n\nStudent's message:\n{user_text}\n\nAnswer directly in simple Hindi/Hinglish."
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1000},
+        "generationConfig": {"maxOutputTokens": 1200},
     }
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
 
     last_response = None
     for attempt in range(3):
@@ -146,6 +113,7 @@ def ai_reply(user_text, menu_context=""):
 
     if last_response is None:
         raise RuntimeError("Gemini request failed")
+
     r = last_response
     if not r.ok:
         try:
@@ -167,6 +135,7 @@ def ai_reply(user_text, menu_context=""):
     if not candidates:
         logging.error("Gemini returned no candidates: %s", data)
         raise RuntimeError("Gemini returned no answer")
+
     parts = candidates[0].get("content", {}).get("parts", [])
     text = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
     if not text:
@@ -174,65 +143,38 @@ def ai_reply(user_text, menu_context=""):
     return text
 
 
+def menu_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📌 आज के अपडेट", "callback_data": "today"}, {"text": "📢 All Updates", "callback_data": "updates"}],
+            [{"text": "📝 Exam", "callback_data": "exam"}, {"text": "🏆 Result", "callback_data": "result"}],
+            [{"text": "🎓 Admission", "callback_data": "admission"}, {"text": "📅 Dates", "callback_data": "dates"}],
+            [{"text": "💰 Fee", "callback_data": "fee"}, {"text": "📊 Marks", "callback_data": "marks"}],
+            [{"text": "🗓 Semester Hub", "callback_data": "semester"}, {"text": "🕐 Time Table", "callback_data": "timetable"}],
+            [{"text": "🔔 Notifications", "callback_data": "notifications"}, {"text": "🤖 Ask Uniraj AI", "callback_data": "ask"}],
+            [{"text": "ℹ️ Help", "callback_data": "help"}, {"text": "🔗 Official Sources", "callback_data": "official"}],
+        ]
+    }
+
+
 def answer_callback(data):
     canned = {
-        "today": "📌 आज के अपडेट\n\nमैं Uniraj के current notices और exam updates में मदद कर सकता हूँ। किसी भी notice/date के लिए course + semester लिखें।\n\n🔎 Official source: " + OFFICIAL_UNIRAJ,
-        "exam": "📝 Exam\n\nExam form, timetable, admit card, practical या exam pattern पूछें। Course + semester लिखने पर मैं उसी हिसाब से जवाब दूँगा।",
-        "result": "🏆 Result\n\nअपना course + semester लिखें। अगर personal result देखना है तो official result portal इस्तेमाल करें या Result Help Group में roll number + DOB भेजकर सहायता लें।",
-        "syllabus": "📚 Syllabus\n\nCourse + semester + subject लिखें। जहाँ official PDF उपलब्ध है, मैं वही PDF दूँगा—AI से बनाया हुआ fake syllabus नहीं।",
-        "admission": "🎓 Admission\n\nCourse + session लिखकर admission से जुड़ा सवाल भेजें।",
-        "dates": "📅 Dates\n\nExam/form/result की date पूछने के लिए course + semester लिखें। Current official date verify करके ही बताई जाएगी।",
-        "marks": "📊 Marks\n\nMarks, grade, passing marks या result से जुड़ा सवाल भेजें।",
-        "semester": "🗓 Semester Hub\n\nअपना course + semester लिखें। मैं syllabus, study plan, important topics और exam preparation में मदद करूँगा।",
-        "timetable": "🕐 Time Table\n\nCourse + semester लिखकर timetable पूछें। Official timetable उपलब्ध होने पर उसी source को प्राथमिकता दी जाएगी।",
-        "ask": "🤖 Ask AI\n\nअपना study या Uniraj-related सवाल सीधे लिखें।",
-        "study": "📚 Free Study Resources\n\nFree guess papers और study material के लिए हमारे study-resource channels देखें।\n\nनीचे buttons से खोल सकते हैं।",
-        "help": "ℹ️ Help\n\nबस सवाल लिखें। उदाहरण:\n• BSc 2nd semester Maths syllabus\n• BSc 2nd semester result\n• Exam form date\n• Important questions\n• Guess paper",
-        "official": "🔗 Official Sources\n\nUniraj: " + OFFICIAL_UNIRAJ + "\nResult: " + OFFICIAL_RESULT + "\nAdmission: " + OFFICIAL_ADMISSION + "\nSyllabus: " + OFFICIAL_SYLLABUS,
-        "about": "👨‍💻 Bot Info\n\nयह Uniraj Information Section है, जो students को study, syllabus, exam, result और university information समझने में मदद करता है।\n\n⚡ Powered by KESHAV MADHAV",
+        "today": "📌 आज के अपडेट\n\nअपना course/semester लिखकर पूछें। मैं उपलब्ध जानकारी के आधार पर मदद करूँगा।",
+        "updates": "📢 All Updates\n\nExam, Result, Admission, Circular, Form, Reval और अन्य विश्वविद्यालय अपडेट के बारे में पूछें।",
+        "exam": "📝 Exam\n\nआपका course और semester बताइए। फिर exam से जुड़ी जानकारी पूछें।",
+        "result": "🏆 Result\n\nअपना course + semester बताइए। अगर personal result देखना है तो Roll Number और DOB वाले Result Help विकल्प का उपयोग करें।",
+        "admission": "🎓 Admission\n\nCourse और session बताइए, फिर admission से जुड़ा सवाल पूछें।",
+        "dates": "📅 Dates\n\nCourse + semester और किस चीज की date चाहिए, इतना लिखें।",
+        "fee": "💰 Fee\n\nCourse + semester बताइए और fee से जुड़ा सवाल पूछें।",
+        "marks": "📊 Marks\n\nCourse/semester और marks से जुड़ा सवाल भेजें।",
+        "semester": "🗓 Semester Hub\n\nCourse + semester लिखें। मैं syllabus, topics, notes और preparation में मदद करूँगा।",
+        "timetable": "🕐 Time Table\n\nCourse + semester लिखें और बताएं कि exam या class timetable चाहिए।",
+        "notifications": "🔔 Notifications\n\nमहत्वपूर्ण Uniraj updates के लिए bot में अपना सवाल भेजें।",
+        "ask": "🤖 Ask Uniraj AI\n\nअपना सवाल सीधे भेजें। मैं बातचीत का context याद रखकर जवाब दूँगा।",
+        "help": "ℹ️ Help\n\nउदाहरण: 'BSc 2nd semester Maths syllabus बताओ' या 'मेरी पिछली बात के अनुसार exam date बताओ।'",
+        "official": "🔗 Official Sources\n\nUniraj: https://www.uniraj.ac.in/\nResult: https://result.uniraj.ac.in/\nAdmission: https://admissions.uniraj.ac.in/",
     }
     return canned.get(data, "अपना सवाल भेजें।")
-
-
-def handle_special_query(chat_id, text):
-    """Handle high-value deterministic resources before asking Gemini."""
-    t = text.lower().replace("।", " ").strip()
-    result_words = ("result", "रिजल्ट", "परिणाम", "marksheet", "मार्कशीट")
-    syllabus_words = ("syllabus", "सिलेबस", "पाठ्यक्रम")
-    guess_words = ("guess paper", "guesspaper", "गेस पेपर", "important questions", "इम्पोर्टेन्ट क्वेश्चन")
-    unhappy_words = ("satisfied नहीं", "satisfied nahi", "गलत जवाब", "wrong answer", "काम नहीं आया", "मदद नहीं मिली", "not satisfied", "समझ नहीं आया")
-
-    if any(w in t for w in unhappy_words):
-        send_message(chat_id, "🙏 अगर जवाब आपकी जरूरत के मुताबिक नहीं था, यहाँ अपना सवाल सीधे लिख सकते हैं।\n\nऔर community/help के लिए Result & Student Help Group देखें:", {"inline_keyboard": [[{"text": "📲 Student Help Group", "url": RESULT_HELP_GROUP}]]})
-        return True
-
-    if any(w in t for w in guess_words):
-        send_message(chat_id, "📚 Free Guess Papers\n\nGuess papers और study material यहाँ उपलब्ध हैं। अपनी तैयारी के लिए course/semester के अनुसार material देखें:", resource_keyboard())
-        return True
-
-    if any(w in t for w in syllabus_words):
-        if "bsc" in t and ("math" in t or "गणित" in t):
-            try:
-                send_document(chat_id, BSC_MATHS_SYLLABUS_PDF, "📚 Official B.Sc. Maths Group Syllabus\nSession: 2025-26\nSource: University of Rajasthan\n\n⚠️ यह official University PDF है; AI-generated syllabus नहीं।")
-                send_message(chat_id, "अगर आपको किसी दूसरे course/subject का latest official syllabus चाहिए, बस course + subject + semester लिखें।\n\nOfficial syllabus list: " + OFFICIAL_SYLLABUS)
-                return True
-            except Exception:
-                logging.exception("Failed to send BSc Maths syllabus PDF")
-                send_message(chat_id, "📚 Official B.Sc. Maths syllabus यहाँ देखें:\n" + BSC_MATHS_SYLLABUS_PDF)
-                return True
-        send_message(chat_id, "📚 Latest official syllabus University की syllabus section से लिया जाना चाहिए—मैं fake/AI-generated syllabus को official नहीं बताऊँगा.\n\nOfficial Syllabus: " + OFFICIAL_SYLLABUS)
-        return True
-
-    if any(w in t for w in result_words):
-        # A personal result cannot be fabricated. Give the official portal plus the user's requested help group.
-        send_message(chat_id, "🏆 Result Information\n\nअगर आपका result जारी हो चुका है, official University result portal पर course/semester चुनकर Roll Number/DOB से check करें:\n" + OFFICIAL_RESULT + "\n\n📲 अगर result निकालने में मदद चाहिए, यहाँ Result Help Group है:", result_keyboard())
-        return True
-
-    if "kisne banaya" in t or "किसने बनाया" in t or "who made" in t or "developer" in t or "bot kisne" in t:
-        send_message(chat_id, "👨‍💻 यह Uniraj Information Section bot है।\n\n⚡ Powered by KESHAV MADHAV")
-        return True
-
-    return False
 
 
 def configure_webhook():
@@ -260,7 +202,7 @@ def health():
         "status": "running",
         "ai": "Gemini REST",
         "model": GEMINI_MODEL,
-        "build": "2026-09-10-uniraj-info-upgrade",
+        "build": "2026-09-10-conversation-memory-fix",
     })
 
 
@@ -273,14 +215,15 @@ def webhook():
             chat_id = cb["message"]["chat"]["id"]
             data = cb.get("data", "")
             USER_CONTEXT[chat_id] = data
+            # A menu click starts a fresh intent, but its context is available to the next message.
+            if data in ("result", "exam", "admission", "dates", "fee", "marks", "semester", "timetable", "today", "updates", "ask"):
+                USER_HISTORY[chat_id] = []
             text = answer_callback(data)
-            if data == "study":
-                send_message(chat_id, text, resource_keyboard())
-            elif data == "result":
-                send_message(chat_id, text, result_keyboard())
-            else:
-                send_message(chat_id, text)
-            requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb["id"]}, timeout=10)
+            send_message(chat_id, text)
+            try:
+                requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": cb["id"]}, timeout=10)
+            except Exception:
+                pass
             return jsonify({"ok": True})
 
         message = update.get("message") or {}
@@ -296,18 +239,9 @@ def webhook():
 
         if text.startswith("/start"):
             USER_CONTEXT.pop(chat_id, None)
-            welcome = (
-                "🎓 <b>Uniraj Information Section में आपका स्वागत है!</b>\n\n"
-                "Rajasthan University से जुड़ी पढ़ाई, syllabus, exam, result, dates और study help के लिए अपना सवाल भेजें।\n\n"
-                "⚡ <b>Powered by KESHAV MADHAV</b>"
-            )
-            # HTML is enabled only for this controlled welcome text.
-            payload = {"chat_id": chat_id, "text": welcome, "parse_mode": "HTML", "reply_markup": main_keyboard(), "disable_web_page_preview": True}
-            r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
-            r.raise_for_status()
-            return jsonify({"ok": True})
-
-        if handle_special_query(chat_id, text):
+            USER_HISTORY.pop(chat_id, None)
+            welcome = "🎓 Uniraj Information Section में आपका स्वागत है!\n\n📚 Rajasthan University की पढ़ाई, syllabus, exam, result, admission और updates के लिए अपना सवाल भेजें।\n\n⚡ Powered by KESHAV MADHAV"
+            send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
 
         try:
@@ -317,7 +251,10 @@ def webhook():
 
         try:
             menu_context = USER_CONTEXT.get(chat_id, "")
-            reply = ai_reply(text, menu_context)
+            reply = ai_reply(text, chat_id, menu_context)
+            USER_HISTORY.setdefault(chat_id, []).append(("Student", text))
+            USER_HISTORY[chat_id].append(("Assistant", reply))
+            USER_HISTORY[chat_id] = USER_HISTORY[chat_id][-MAX_HISTORY:]
         except Exception as ai_error:
             logging.exception("AI reply failed")
             error_text = str(ai_error)
@@ -330,7 +267,7 @@ def webhook():
             elif " 404:" in error_text:
                 reply = "❌ Gemini model उपलब्ध नहीं मिला। Render को latest GitHub commit पर redeploy करें।"
             else:
-                reply = f"❌ AI service error: {error_text[:220]}"
+                reply = "❌ अभी जवाब देने में तकनीकी समस्या आ रही है। थोड़ी देर बाद फिर कोशिश करें।"
 
         send_message(chat_id, reply)
         return jsonify({"ok": True})
