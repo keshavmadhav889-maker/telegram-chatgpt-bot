@@ -84,7 +84,22 @@ BROADCAST_WAITING = set()
 def send_message(chat_id, text):
     r = requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}, timeout=10)
     r.raise_for_status(); return r.json()
-\n\n# ADMIN_AI_FAILURE_ALERT_V1\ndef notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):\n    alert = (\n        "🚨 Gemini AI Failure\n\n"\n        f"👤 Chat ID: {chat_id}\n"\n        f"❓ Student question:\n{user_text[:2500]}\n\n"\n        f"🤖 Models tried: {', '.join(tried_models)}\n"\n        f"⚠️ Error: {str(last_error)[:1200]}"\n    )\n    for admin_id in ADMIN_IDS:\n        try:\n            send_message(admin_id, alert)\n        except Exception as exc:\n            logging.warning("Could not notify admin about AI failure: %s", exc)\n
+
+# ADMIN_AI_FAILURE_ALERT_V1
+def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
+    alert = (
+        "🚨 Gemini AI Failure\n\n"
+        f"👤 Chat ID: {chat_id}\n"
+        f"❓ Student question:\n{user_text[:2500]}\n\n"
+        f"🤖 Models tried: {', '.join(tried_models)}\n"
+        f"⚠️ Error: {str(last_error)[:1200]}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            send_message(admin_id, alert)
+        except Exception as exc:
+            logging.warning("Could not notify admin about AI failure: %s", exc)
+
 def configure_telegram_menu():
     try:
         commands = [{"command": c, "description": d} for c, d in MENU_COMMANDS]
@@ -175,7 +190,32 @@ def request_gemini(user_text, chat_id, model, official_data=""):
 
 def is_transient(exc): return any(f"HTTP {code}" in str(exc) for code in [429,500,502,503,504])
 
-def ai_reply(user_text, chat_id):\n    quick = quick_reply(user_text)\n    if quick:\n        return quick\n    official_data = official_source_for(user_text)\n    models = [GEMINI_MODEL]\n    if "gemini-3.1-flash-lite" not in models:\n        models.append("gemini-3.1-flash-lite")\n    last_error = None\n    for model in models:\n        for delay in [0.0, 0.8, 1.8, 3.5]:\n            if delay:\n                time.sleep(delay)\n            try:\n                answer = request_gemini(user_text, chat_id, model, official_data)\n                logging.info("Gemini success model=%s", model)\n                return answer\n            except Exception as exc:\n                last_error = exc\n                logging.warning("Gemini request failed model=%s: %s", model, exc)\n                if not is_transient(exc):\n                    break\n    logging.error("AI unavailable after failover: %s", last_error)\n    notify_admin_ai_failure(user_text, chat_id, last_error, models)\n    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"\n
+def ai_reply(user_text, chat_id):
+    quick = quick_reply(user_text)
+    if quick:
+        return quick
+    official_data = official_source_for(user_text)
+    models = [GEMINI_MODEL]
+    if "gemini-3.1-flash-lite" not in models:
+        models.append("gemini-3.1-flash-lite")
+    last_error = None
+    for model in models:
+        for delay in [0.0, 0.8, 1.8, 3.5]:
+            if delay:
+                time.sleep(delay)
+            try:
+                answer = request_gemini(user_text, chat_id, model, official_data)
+                logging.info("Gemini success model=%s", model)
+                return answer
+            except Exception as exc:
+                last_error = exc
+                logging.warning("Gemini request failed model=%s: %s", model, exc)
+                if not is_transient(exc):
+                    break
+    logging.error("AI unavailable after failover: %s", last_error)
+    notify_admin_ai_failure(user_text, chat_id, last_error, models)
+    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
+
 # ================= INDIRECT CHANNEL PROMOTION =================
 def maybe_add_promotion(chat_id, reply):
     count=len(USER_HISTORY.get(chat_id,[]))//2
