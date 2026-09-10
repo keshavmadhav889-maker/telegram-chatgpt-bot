@@ -9,7 +9,6 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# ================= CONFIG =================
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
@@ -34,44 +33,26 @@ def db_connect():
     conn.commit()
     return conn
 
-
 def register_user(user, chat_id):
     now = time.time()
     try:
         conn = db_connect()
-        conn.execute(
-            "INSERT INTO users(chat_id, username, first_name, active, created_at, last_seen) VALUES(?,?,?,?,?,?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, active=1, last_seen=excluded.last_seen",
-            (chat_id, user.get("username", ""), user.get("first_name", ""), 1, now, now),
-        )
-        conn.commit()
-        conn.close()
+        conn.execute("INSERT INTO users(chat_id, username, first_name, active, created_at, last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, active=1, last_seen=excluded.last_seen", (chat_id, user.get("username", ""), user.get("first_name", ""), 1, now, now))
+        conn.commit(); conn.close()
     except Exception:
         logging.exception("User registration failed")
 
-
 def get_active_users():
-    conn = db_connect()
-    rows = conn.execute("SELECT chat_id FROM users WHERE active=1").fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
+    conn = db_connect(); rows = conn.execute("SELECT chat_id FROM users WHERE active=1").fetchall(); conn.close(); return [r[0] for r in rows]
 
 def mark_user_inactive(chat_id):
     try:
-        conn = db_connect()
-        conn.execute("UPDATE users SET active=0 WHERE chat_id=?", (chat_id,))
-        conn.commit()
-        conn.close()
+        conn = db_connect(); conn.execute("UPDATE users SET active=0 WHERE chat_id=?", (chat_id,)); conn.commit(); conn.close()
     except Exception:
         logging.exception("Could not deactivate user")
 
-
 def user_count():
-    conn = db_connect()
-    total = conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0]
-    conn.close()
-    return total
+    conn = db_connect(); total = conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0]; conn.close(); return total
 
 # ================= UNIRAJ SOURCES =================
 UNIRAJ_HOME = "https://www.uniraj.ac.in/"
@@ -93,333 +74,192 @@ If official source data is unavailable, clearly say that the official site could
 For personal result questions, give the official result portal and Result Help group; never claim to access private marks.
 For guess-paper questions, mention both free guess-paper channels.
 If asked who made the bot, say it was made and powered by KESHAV MADHAV.
-Verified sources:
-University: {UNIRAJ_HOME}
-Syllabus index: {UNIRAJ_SYLLABUS}
-B.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}
-Notices: {UNIRAJ_NOTICES}
-Result: {UNIRAJ_RESULT}
-Admission: {UNIRAJ_ADMISSION}
-Free Guess Papers: {GUESS_1} and {GUESS_2}
-Result Help: {RESULT_HELP}
-"""
+Verified sources: University {UNIRAJ_HOME}; Syllabus {UNIRAJ_SYLLABUS}; B.Sc Maths PDF {BSC_MATHS_2025_26_PDF}; Notices {UNIRAJ_NOTICES}; Result {UNIRAJ_RESULT}; Admission {UNIRAJ_ADMISSION}; Guess Papers {GUESS_1} and {GUESS_2}; Result Help {RESULT_HELP}."""
 
 # ================= TELEGRAM UI =================
-MENU_COMMANDS = [
-    ("updates", "📢 Uniraj latest updates"),
-    ("exam", "📝 Exam information"),
-    ("result", "🏆 Result portal/help"),
-    ("admission", "🎓 Admission information"),
-    ("syllabus", "📘 Official syllabus"),
-    ("guess", "📚 Free guess papers"),
-    ("ask", "🤖 Ask Uniraj AI"),
-    ("help", "ℹ️ Help"),
-    ("reset", "♻️ Reset chat memory"),
-]
-ADMIN_MENU_COMMANDS = MENU_COMMANDS + [
-    ("broadcast", "📢 Send message to all users"),
-    ("users", "👥 Active user count"),
-]
+MENU_COMMANDS = [("updates", "📢 Uniraj latest updates"), ("exam", "📝 Exam information"), ("result", "🏆 Result portal/help"), ("admission", "🎓 Admission information"), ("syllabus", "📘 Official syllabus"), ("guess", "📚 Free guess papers"), ("ask", "🤖 Ask Uniraj AI"), ("help", "ℹ️ Help"), ("reset", "♻️ Reset chat memory")]
+ADMIN_MENU_COMMANDS = MENU_COMMANDS + [("broadcast", "📢 Send message to all users"), ("users", "👥 Active user count")]
 BROADCAST_WAITING = set()
 
-
 def send_message(chat_id, text):
-    payload = {"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
-    r.raise_for_status()
-    return r.json()
-
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}, timeout=10)
+    r.raise_for_status(); return r.json()
 
 def configure_telegram_menu():
     try:
         commands = [{"command": c, "description": d} for c, d in MENU_COMMANDS]
-        r1 = requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands": commands}, timeout=8)
-        r1.raise_for_status()
-        # Only the admin chat gets the extra admin commands.
+        requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands": commands}, timeout=8).raise_for_status()
+        admin_commands = [{"command": c, "description": d} for c, d in ADMIN_MENU_COMMANDS]
         for admin_id in ADMIN_IDS:
-            admin_commands = [{"command": c, "description": d} for c, d in ADMIN_MENU_COMMANDS]
-            r_admin = requests.post(
-                f"{TELEGRAM_API}/setMyCommands",
-                json={"commands": admin_commands, "scope": {"type": "chat", "chat_id": admin_id}},
-                timeout=8,
-            )
-            r_admin.raise_for_status()
-        r2 = requests.post(f"{TELEGRAM_API}/setChatMenuButton", json={"menu_button": {"type": "commands"}}, timeout=8)
-        r2.raise_for_status()
-        logging.info("Telegram native Menu configured: student + admin scopes")
+            requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands": admin_commands, "scope": {"type": "chat", "chat_id": admin_id}}, timeout=8).raise_for_status()
+        requests.post(f"{TELEGRAM_API}/setChatMenuButton", json={"menu_button": {"type": "commands"}}, timeout=8).raise_for_status()
+        logging.info("Telegram native Menu configured")
     except Exception as exc:
         logging.warning("Telegram Menu setup failed: %s", exc)
 
 # ================= BROADCAST =================
 def broadcast_message(text):
-    users = get_active_users()
-    sent = 0
-    failed = 0
+    users = get_active_users(); sent = failed = 0
     for chat_id in users:
         try:
-            send_message(chat_id, text)
-            sent += 1
-            # Stay gentle with Telegram API limits.
-            time.sleep(0.04)
+            send_message(chat_id, text); sent += 1; time.sleep(0.04)
         except Exception as exc:
-            failed += 1
-            logging.warning("Broadcast failed chat_id=%s: %s", chat_id, exc)
-            error_text = str(exc).lower()
-            if "blocked" in error_text or "chat not found" in error_text or "forbidden" in error_text:
-                mark_user_inactive(chat_id)
+            failed += 1; logging.warning("Broadcast failed chat_id=%s: %s", chat_id, exc)
+            s = str(exc).lower()
+            if "blocked" in s or "chat not found" in s or "forbidden" in s: mark_user_inactive(chat_id)
     return sent, failed, len(users)
 
 # ================= QUICK REPLIES =================
 def quick_reply(text):
     q = text.lower()
-    if any(x in q for x in ["guess paper", "guesspaper", "guess papers", "गेस पेपर"]):
-        return f"📚 Free Uniraj Guess Papers\n\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}"
-    if any(x in q for x in ["kisne banaya", "किसने बनाया", "who made", "developer", "owner"]):
-        return "⚡ यह bot KESHAV MADHAV द्वारा बनाया और powered है।"
-    if any(x in q for x in ["result", "रिजल्ट", "परिणाम"]):
-        return f"🏆 Uniraj Official Result\n\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}"
-    if any(x in q for x in ["admission", "प्रवेश"]):
-        return f"🎓 Uniraj Official Admission\n\n{UNIRAJ_ADMISSION}"
+    if any(x in q for x in ["guess paper", "guesspaper", "guess papers", "गेस पेपर"]): return f"📚 Free Uniraj Guess Papers\n\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}"
+    if any(x in q for x in ["kisne banaya", "किसने बनाया", "who made", "developer", "owner"]): return "⚡ यह bot KESHAV MADHAV द्वारा बनाया और powered है।"
+    if any(x in q for x in ["result", "रिजल्ट", "परिणाम"]): return f"🏆 Uniraj Official Result\n\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}"
+    if any(x in q for x in ["admission", "प्रवेश"]): return f"🎓 Uniraj Official Admission\n\n{UNIRAJ_ADMISSION}"
     if any(x in q for x in ["syllabus", "सिलेबस", "पाठ्यक्रम"]):
-        if any(x in q for x in ["math", "mathematics", "गणित"]):
-            return f"📘 B.Sc. Maths Group 2025-26 Official PDF:\n{BSC_MATHS_2025_26_PDF}\n\nOfficial Syllabus Index:\n{UNIRAJ_SYLLABUS}"
+        if any(x in q for x in ["math", "mathematics", "गणित"]): return f"📘 B.Sc. Maths Group 2025-26 Official PDF:\n{BSC_MATHS_2025_26_PDF}\n\nOfficial Syllabus Index:\n{UNIRAJ_SYLLABUS}"
         return f"📘 Official Uniraj Syllabus Index:\n{UNIRAJ_SYLLABUS}"
     return None
 
 # ================= OFFICIAL UNIRAJ LOOKUP =================
-OFFICIAL_CACHE = {}
-CACHE_SECONDS = 90
+OFFICIAL_CACHE = {}; CACHE_SECONDS = 90
 
 def fetch_official(url, timeout=3):
-    now = time.time()
-    cached = OFFICIAL_CACHE.get(url)
-    if cached and now - cached[0] < CACHE_SECONDS:
-        return cached[1]
-    r = requests.get(url, timeout=timeout, headers={"User-Agent": "UnirajInformationBot/2.0"})
-    r.raise_for_status()
-    html = r.text
-    OFFICIAL_CACHE[url] = (now, html)
-    return html
+    now = time.time(); cached = OFFICIAL_CACHE.get(url)
+    if cached and now - cached[0] < CACHE_SECONDS: return cached[1]
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "UnirajInformationBot/2.0"}); r.raise_for_status()
+    OFFICIAL_CACHE[url] = (now, r.text); return r.text
 
 def official_source_for(text):
     q = text.lower()
     syllabus = any(x in q for x in ["syllabus", "सिलेबस", "पाठ्यक्रम"])
     current = any(x in q for x in ["latest", "today", "aaj", "current", "abhi", "update", "notice", "notification", "exam date", "exam dates", "date", "timetable", "time table", "last date", "आज", "अभी", "अपडेट", "नोटिस", "तिथि", "अंतिम तिथि"])
     admission = any(x in q for x in ["admission", "प्रवेश"])
-    if syllabus and any(x in q for x in ["math", "mathematics", "गणित"]):
-        return f"VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}"
+    if syllabus and any(x in q for x in ["math", "mathematics", "गणित"]): return f"VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}"
     if syllabus:
         try:
-            html = fetch_official(UNIRAJ_SYLLABUS)
-            soup = BeautifulSoup(html, "html.parser")
-            matches = []
+            soup = BeautifulSoup(fetch_official(UNIRAJ_SYLLABUS), "html.parser"); matches=[]
             for a in soup.find_all("a", href=True):
-                title = " ".join(a.stripped_strings).strip()
-                href = a.get("href", "")
-                if not title:
-                    continue
-                if any(w in (title + " " + href).lower() for w in q.split() if len(w) > 2):
-                    matches.append(f"- {title}: {href}")
-            if matches:
-                return "VERIFIED OFFICIAL UNIRAJ SYLLABUS PAGE DATA:\n" + "\n".join(matches[:10])
-        except Exception as exc:
-            logging.info("Official syllabus lookup unavailable: %s", exc)
+                title=" ".join(a.stripped_strings).strip(); href=a.get("href", "")
+                if title and any(w in (title+" "+href).lower() for w in q.split() if len(w)>2): matches.append(f"- {title}: {href}")
+            if matches: return "VERIFIED OFFICIAL UNIRAJ SYLLABUS PAGE DATA:\n"+"\n".join(matches[:10])
+        except Exception as exc: logging.info("Official syllabus lookup unavailable: %s", exc)
         return f"OFFICIAL SYLLABUS INDEX: {UNIRAJ_SYLLABUS}\nB.Sc Maths known official PDF: {BSC_MATHS_2025_26_PDF}"
     if current:
         try:
-            html = fetch_official(UNIRAJ_NOTICES)
-            soup = BeautifulSoup(html, "html.parser")
-            text_data = " ".join(soup.stripped_strings)
+            soup=BeautifulSoup(fetch_official(UNIRAJ_NOTICES), "html.parser"); text_data=" ".join(soup.stripped_strings)
             return f"VERIFIED OFFICIAL UNIRAJ NOTICES PAGE: {UNIRAJ_NOTICES}\nOFFICIAL PAGE TEXT EXCERPT:\n{text_data[:9000]}"
         except Exception as exc:
             logging.info("Official notices lookup unavailable: %s", exc)
             return f"OFFICIAL UNIRAJ NOTICES: {UNIRAJ_NOTICES}\nThe official website is temporarily slow/unavailable. Do not guess current information."
-    if admission:
-        return f"VERIFIED OFFICIAL ADMISSION PORTAL: {UNIRAJ_ADMISSION}"
+    if admission: return f"VERIFIED OFFICIAL ADMISSION PORTAL: {UNIRAJ_ADMISSION}"
     return ""
 
 # ================= GEMINI =================
 def make_prompt(user_text, chat_id, official_data=""):
-    history = USER_HISTORY.get(chat_id, [])[-MAX_HISTORY:]
-    parts = [f"SYSTEM: {SYSTEM_PROMPT}"]
-    if official_data:
-        parts.append("VERIFIED OFFICIAL UNIRAJ DATA:\n" + official_data)
-    for role, msg in history:
-        parts.append(f"{role.upper()}: {msg}")
-    parts.append(f"STUDENT: {user_text}")
-    return "\n\n".join(parts)
+    parts=[f"SYSTEM: {SYSTEM_PROMPT}"]
+    if official_data: parts.append("VERIFIED OFFICIAL UNIRAJ DATA:\n"+official_data)
+    for role,msg in USER_HISTORY.get(chat_id, [])[-MAX_HISTORY:]: parts.append(f"{role.upper()}: {msg}")
+    parts.append(f"STUDENT: {user_text}"); return "\n\n".join(parts)
 
 def request_gemini(user_text, chat_id, model, official_data=""):
-    if not GEMINI_API_KEY:
-        raise RuntimeError("Gemini unavailable")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload = {"contents": [{"role": "user", "parts": [{"text": make_prompt(user_text, chat_id, official_data)}]}], "generationConfig": {"maxOutputTokens": 900, "temperature": 0.2}}
-    r = requests.post(url, headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}, json=payload, timeout=AI_TIMEOUT)
-    if not r.ok:
-        raise RuntimeError(f"Gemini {model} HTTP {r.status_code}: {r.text[:500]}")
-    data = r.json()
-    candidates = data.get("candidates", [])
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    answer = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
-    if not answer:
-        raise RuntimeError("Empty Gemini response")
+    if not GEMINI_API_KEY: raise RuntimeError("Gemini unavailable")
+    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    payload={"contents":[{"role":"user","parts":[{"text":make_prompt(user_text,chat_id,official_data)}]}],"generationConfig":{"maxOutputTokens":900,"temperature":0.2}}
+    r=requests.post(url,headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
+    if not r.ok: raise RuntimeError(f"Gemini {model} HTTP {r.status_code}: {r.text[:500]}")
+    data=r.json(); candidates=data.get("candidates",[]); parts=candidates[0].get("content",{}).get("parts",[]) if candidates else []
+    answer="".join(p.get("text","") for p in parts if p.get("text")).strip()
+    if not answer: raise RuntimeError("Empty Gemini response")
     return answer
 
-def is_transient(exc):
-    return any(f"HTTP {code}" in str(exc) for code in [429, 500, 502, 503, 504])
+def is_transient(exc): return any(f"HTTP {code}" in str(exc) for code in [429,500,502,503,504])
 
 def ai_reply(user_text, chat_id):
-    quick = quick_reply(user_text)
-    if quick:
-        return quick
-    official_data = official_source_for(user_text)
-    last_error = None
-    for delay in [0.0, 1.0, 2.5]:
-        if delay:
-            time.sleep(delay)
-        try:
-            answer = request_gemini(user_text, chat_id, GEMINI_MODEL, official_data)
-            logging.info("Gemini success model=%s", GEMINI_MODEL)
-            return answer
-        except Exception as exc:
-            last_error = exc
-            logging.warning("Gemini request failed: %s", exc)
-            if not is_transient(exc):
-                break
-    logging.error("AI unavailable after retries: %s", last_error)
-    return "अभी आपका सवाल थोड़ा व्यस्त समय में आया है। मैं इसे दोबारा लेने के लिए तैयार हूँ—कृपया वही सवाल एक बार फिर भेजें।"
+    quick=quick_reply(user_text)
+    if quick: return quick
+    official_data=official_source_for(user_text)
+    # Gemini can temporarily return 429/5xx during load. Fail over automatically.
+    models=[GEMINI_MODEL]
+    if "gemini-3.1-flash-lite" not in models: models.append("gemini-3.1-flash-lite")
+    last_error=None
+    for model in models:
+        for delay in [0.0,0.8,1.8,3.5]:
+            if delay: time.sleep(delay)
+            try:
+                answer=request_gemini(user_text,chat_id,model,official_data)
+                logging.info("Gemini success model=%s",model); return answer
+            except Exception as exc:
+                last_error=exc; logging.warning("Gemini request failed model=%s: %s",model,exc)
+                if not is_transient(exc): break
+    logging.error("AI unavailable after failover: %s",last_error)
+    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
 
 # ================= INDIRECT CHANNEL PROMOTION =================
 def maybe_add_promotion(chat_id, reply):
-    count = len(USER_HISTORY.get(chat_id, [])) // 2
-    if count > 0 and count % PROMO_EVERY == 0:
-        return reply + f"\n\n📚 Free Study Material: {GUESS_1}\n📖 Guess Papers: {GUESS_2}"
+    count=len(USER_HISTORY.get(chat_id,[]))//2
+    if count>0 and count%PROMO_EVERY==0: return reply+f"\n\n📚 Free Study Material: {GUESS_1}\n📖 Guess Papers: {GUESS_2}"
     return reply
 
 # ================= WEBHOOK =================
 def configure_webhook():
-    render_url = os.getenv("RENDER_EXTERNAL_URL")
-    if not render_url:
-        return
+    render_url=os.getenv("RENDER_EXTERNAL_URL")
+    if not render_url: return
     try:
-        webhook_url = render_url.rstrip("/") + "/telegram/webhook"
-        r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=8)
-        r.raise_for_status()
-        logging.info("Telegram webhook configured: %s", webhook_url)
-    except Exception as exc:
-        logging.warning("Webhook setup failed: %s", exc)
+        webhook_url=render_url.rstrip("/")+"/telegram/webhook"
+        requests.post(f"{TELEGRAM_API}/setWebhook",json={"url":webhook_url},timeout=8).raise_for_status()
+        logging.info("Telegram webhook configured: %s",webhook_url)
+    except Exception as exc: logging.warning("Webhook setup failed: %s",exc)
 
-configure_webhook()
-configure_telegram_menu()
+configure_webhook(); configure_telegram_menu()
 
 # ================= COMMAND HANDLER =================
 def command_reply(command, chat_id):
-    answers = {
-        "updates": f"📢 Uniraj Official Notices:\n{UNIRAJ_NOTICES}\n\nCurrent information के लिए अपना course/semester लिखें।",
-        "exam": "📝 Exam\n\nअपना course + semester लिखें, जैसे: BSc 3rd semester exam dates",
-        "result": f"🏆 Official Result:\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}",
-        "admission": f"🎓 Official Admission:\n{UNIRAJ_ADMISSION}",
-        "syllabus": f"📘 Official Syllabus Index:\n{UNIRAJ_SYLLABUS}\n\nB.Sc. Maths Group 2025-26 PDF:\n{BSC_MATHS_2025_26_PDF}",
-        "guess": f"📚 Free Uniraj Guess Papers:\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}",
-        "ask": "🤖 अपना Uniraj सवाल सीधे message में भेजें।",
-        "help": "ℹ️ आप Menu खोलकर Exam, Result, Admission, Syllabus, Guess Papers या AI चुन सकते हैं। या अपना सवाल सीधे लिख सकते हैं।",
-    }
-    if command == "reset":
-        USER_HISTORY.pop(chat_id, None)
-        return "♻️ आपकी recent chat memory reset कर दी गई है।"
-    if command == "users":
-        return f"👥 Active users: {user_count()}"
-    return answers.get(command, "अपना सवाल सीधे लिखें।")
+    answers={"updates":f"📢 Uniraj Official Notices:\n{UNIRAJ_NOTICES}\n\nCurrent information के लिए अपना course/semester लिखें.","exam":"📝 Exam\n\nअपना course + semester लिखें, जैसे: BSc 3rd semester exam dates","result":f"🏆 Official Result:\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}","admission":f"🎓 Official Admission:\n{UNIRAJ_ADMISSION}","syllabus":f"📘 Official Syllabus Index:\n{UNIRAJ_SYLLABUS}\n\nB.Sc. Maths Group 2025-26 PDF:\n{BSC_MATHS_2025_26_PDF}","guess":f"📚 Free Uniraj Guess Papers:\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}","ask":"🤖 अपना Uniraj सवाल सीधे message में भेजें।","help":"ℹ️ Menu से Exam, Result, Admission, Syllabus, Guess Papers या AI चुन सकते हैं। या सवाल सीधे लिखें।"}
+    if command=="reset": USER_HISTORY.pop(chat_id,None); return "♻️ आपकी recent chat memory reset कर दी गई है।"
+    return answers.get(command,"अपना सवाल सीधे लिखें।")
 
 # ================= ROUTES =================
 @app.get("/")
 def health():
-    return jsonify({"ok": True, "service": "Uniraj Information Section", "status": "running", "ai": "Gemini", "model": GEMINI_MODEL, "telegram_menu": True, "admin_broadcast": True, "active_users": user_count(), "official_uniraj_lookup": True, "build": "2026-09-10-admin-broadcast-v1"})
+    return jsonify({"ok":True,"service":"Uniraj Information Section","status":"running","ai":"Gemini","model":GEMINI_MODEL,"telegram_menu":True,"official_uniraj_lookup":True,"build":"2026-09-10-ai-reliable-v3"})
 
 @app.post("/telegram/webhook")
 def telegram_webhook():
     try:
-        update = request.get_json(silent=True) or {}
-        message = update.get("message")
-        if not message:
-            return jsonify({"ok": True})
-        user = message.get("from", {})
-        if user.get("is_bot"):
-            return jsonify({"ok": True})
-        chat_id = message.get("chat", {}).get("id")
-        text = (message.get("text") or "").strip()
-        if not chat_id or not text:
-            return jsonify({"ok": True})
-
-        register_user(user, chat_id)
-        is_admin = chat_id in ADMIN_IDS
-
-        # Broadcast flow: only the admin can start or complete it.
-        if is_admin and text.startswith("/broadcast"):
-            BROADCAST_WAITING.add(chat_id)
-            send_message(chat_id, "📢 Broadcast mode ON\n\nअब वह message भेजें जो सभी active bot users को भेजना है।\n\n❌ Cancel करने के लिए /cancel लिखें।")
-            return jsonify({"ok": True})
-
-        if is_admin and chat_id in BROADCAST_WAITING and text.startswith("/cancel"):
-            BROADCAST_WAITING.discard(chat_id)
-            send_message(chat_id, "❌ Broadcast cancel कर दिया गया।")
-            return jsonify({"ok": True})
-
-        if is_admin and chat_id in BROADCAST_WAITING and not text.startswith("/"):
-            BROADCAST_WAITING.discard(chat_id)
-            send_message(chat_id, "⏳ Broadcast भेजा जा रहा है...")
-            sent, failed, total = broadcast_message(text)
-            send_message(chat_id, f"📢 Broadcast complete\n\n👥 Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}")
-            return jsonify({"ok": True})
-
+        update=request.get_json(silent=True) or {}; message=update.get("message")
+        if not message: return jsonify({"ok":True})
+        user=message.get("from",{})
+        if user.get("is_bot"): return jsonify({"ok":True})
+        chat_id=message.get("chat",{}).get("id"); text=(message.get("text") or "").strip()
+        if not chat_id or not text: return jsonify({"ok":True})
+        register_user(user,chat_id)
         if text.startswith("/start"):
-            USER_HISTORY.pop(chat_id, None)
-            welcome = "🎓 Uniraj Information Section में आपका स्वागत है!\n\nRajasthan University से जुड़े syllabus, exam, result, admission, notices और study questions पूछें।\n\n⚡ Powered by KESHAV MADHAV\n\nनीचे/पास वाले Menu से सभी options कभी भी खोल सकते हैं।"
-            if is_admin:
-                welcome += "\n\n🔐 Admin tools आपके Menu में उपलब्ध हैं।"
-            send_message(chat_id, welcome)
-            return jsonify({"ok": True})
-
-        if text.startswith("/reset"):
-            send_message(chat_id, command_reply("reset", chat_id))
-            return jsonify({"ok": True})
-
+            USER_HISTORY.pop(chat_id,None); send_message(chat_id,"🎓 Uniraj Information Section में आपका स्वागत है!\n\nRajasthan University से जुड़े syllabus, exam, result, admission, notices और study questions पूछें।\n\n⚡ Powered by KESHAV MADHAV\n\nMenu से सभी options कभी भी खोल सकते हैं।"); return jsonify({"ok":True})
+        if text.startswith("/cancel"):
+            if chat_id in ADMIN_IDS: BROADCAST_WAITING.discard(chat_id); send_message(chat_id,"❌ Broadcast cancel कर दिया गया।")
+            return jsonify({"ok":True})
+        if text.startswith("/broadcast"):
+            if chat_id not in ADMIN_IDS: return jsonify({"ok":True})
+            BROADCAST_WAITING.add(chat_id); send_message(chat_id,f"📢 Broadcast mode ON\n\nयह message सभी active users को भेजा जाएगा।\n👥 Current users: {user_count()}\n\nअब अपना message भेजें।\nCancel के लिए /cancel भेजें।"); return jsonify({"ok":True})
         if text.startswith("/users"):
-            if not is_admin:
-                send_message(chat_id, "यह command उपलब्ध नहीं है।")
-            else:
-                send_message(chat_id, command_reply("users", chat_id))
-            return jsonify({"ok": True})
-
+            if chat_id in ADMIN_IDS: send_message(chat_id,f"👥 Active bot users: {user_count()}")
+            return jsonify({"ok":True})
+        if chat_id in ADMIN_IDS and chat_id in BROADCAST_WAITING:
+            BROADCAST_WAITING.discard(chat_id); sent,failed,total=broadcast_message(text); send_message(chat_id,f"📢 Broadcast complete\n\n👥 Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}"); return jsonify({"ok":True})
+        if text.startswith("/reset"):
+            send_message(chat_id,command_reply("reset",chat_id)); return jsonify({"ok":True})
         if text.startswith("/"):
-            command = text.split()[0][1:].split("@")[0].lower()
-            allowed = {c for c, _ in MENU_COMMANDS}
-            if is_admin:
-                allowed |= {"broadcast", "users"}
-            if command == "broadcast" and not is_admin:
-                send_message(chat_id, "यह command केवल admin के लिए है।")
-                return jsonify({"ok": True})
-            if command in allowed:
-                send_message(chat_id, command_reply(command, chat_id))
-                return jsonify({"ok": True})
-
-        try:
-            requests.post(f"{TELEGRAM_API}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}, timeout=3)
-        except Exception:
-            pass
-
-        reply = ai_reply(text, chat_id)
-        USER_HISTORY.setdefault(chat_id, []).append(("Student", text))
-        USER_HISTORY.setdefault(chat_id, []).append(("Bot", reply))
-        USER_HISTORY[chat_id] = USER_HISTORY[chat_id][-MAX_HISTORY:]
-        reply = maybe_add_promotion(chat_id, reply)
-        send_message(chat_id, reply)
-        return jsonify({"ok": True})
-
+            command=text.split()[0][1:].split("@")[0].lower()
+            if command in {c for c,_ in MENU_COMMANDS}: send_message(chat_id,command_reply(command,chat_id)); return jsonify({"ok":True})
+        try: requests.post(f"{TELEGRAM_API}/sendChatAction",json={"chat_id":chat_id,"action":"typing"},timeout=3)
+        except Exception: pass
+        reply=ai_reply(text,chat_id)
+        USER_HISTORY.setdefault(chat_id,[]).append(("Student",text)); USER_HISTORY.setdefault(chat_id,[]).append(("Bot",reply)); USER_HISTORY[chat_id]=USER_HISTORY[chat_id][-MAX_HISTORY:]
+        reply=maybe_add_promotion(chat_id,reply); send_message(chat_id,reply)
+        return jsonify({"ok":True})
     except Exception:
-        logging.exception("Telegram webhook failed")
-        return jsonify({"ok": True})
+        logging.exception("Telegram webhook failed"); return jsonify({"ok":True})
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+if __name__=="__main__":
+    port=int(os.getenv("PORT","10000")); app.run(host="0.0.0.0",port=port)
