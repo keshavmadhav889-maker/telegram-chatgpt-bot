@@ -1,0 +1,112 @@
+name: Repair bot syntax
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/repair-bot-syntax.yml'
+      - 'bot.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair malformed escaped code
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('bot.py')
+          s = p.read_text(encoding='utf-8')
+
+          helper = '''
+
+# ADMIN_AI_FAILURE_ALERT_V1
+def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
+    alert = (
+        "🚨 Gemini AI Failure\\n\\n"
+        f"👤 Chat ID: {chat_id}\\n"
+        f"❓ Student question:\\n{user_text[:2500]}\\n\\n"
+        f"🤖 Models tried: {', '.join(tried_models)}\\n"
+        f"⚠️ Error: {str(last_error)[:1200]}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            send_message(admin_id, alert)
+        except Exception as exc:
+            logging.warning("Could not notify admin about AI failure: %s", exc)
+'''
+
+          marker = '# ADMIN_AI_FAILURE_ALERT_V1'
+          if marker in s:
+              start = s.rfind(r'\\n\\n' + marker, 0, s.find(marker) + len(marker))
+              if start < 0:
+                  start = s.find(marker)
+              else:
+                  pass
+              end = s.find('def configure_telegram_menu():', start)
+              if end < 0:
+                  raise SystemExit('configure menu anchor missing')
+              s = s[:start] + helper + '\ndef configure_telegram_menu():' + s[end + len('def configure_telegram_menu():'):]
+          else:
+              anchor = '\ndef configure_telegram_menu():'
+              if anchor not in s:
+                  raise SystemExit('configure menu anchor missing')
+              s = s.replace(anchor, helper + anchor, 1)
+
+          new_func = '''def ai_reply(user_text, chat_id):
+    quick = quick_reply(user_text)
+    if quick:
+        return quick
+    official_data = official_source_for(user_text)
+    models = [GEMINI_MODEL]
+    if "gemini-3.1-flash-lite" not in models:
+        models.append("gemini-3.1-flash-lite")
+    last_error = None
+    for model in models:
+        for delay in [0.0, 0.8, 1.8, 3.5]:
+            if delay:
+                time.sleep(delay)
+            try:
+                answer = request_gemini(user_text, chat_id, model, official_data)
+                logging.info("Gemini success model=%s", model)
+                return answer
+            except Exception as exc:
+                last_error = exc
+                logging.warning("Gemini request failed model=%s: %s", model, exc)
+                if not is_transient(exc):
+                    break
+    logging.error("AI unavailable after failover: %s", last_error)
+    notify_admin_ai_failure(user_text, chat_id, last_error, models)
+    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
+'''
+
+          start = s.find('def ai_reply(user_text, chat_id):')
+          marker2 = '# ================= INDIRECT CHANNEL PROMOTION ================='
+          end = s.find(marker2, start)
+          if start < 0 or end < 0:
+              raise SystemExit('ai_reply section missing')
+          s = s[:start] + new_func + '\n' + s[end:]
+
+          p.write_text(s, encoding='utf-8')
+          PY
+      - name: Validate syntax
+        run: python -m py_compile bot.py
+      - name: Commit repair
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bot.py
+          if git diff --cached --quiet; then
+            echo 'No changes needed'
+          else
+            git commit -m 'Repair bot syntax error'
+            git push
+          fi
