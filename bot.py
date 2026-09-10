@@ -1,7 +1,9 @@
 import os
+import time
 import logging
 import requests
 from flask import Flask, request, jsonify
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
@@ -9,11 +11,11 @@ app = Flask(__name__)
 # ================= CONFIG =================
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-# Current free-friendly Gemini model. Can be overridden in Render with GEMINI_MODEL.
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
-AI_TIMEOUT = 35
-MAX_HISTORY = 10
+AI_TIMEOUT = 18
+MAX_HISTORY = 12
 USER_HISTORY = {}
+PROMO_EVERY = 5
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN missing hai")
@@ -40,7 +42,8 @@ SYSTEM_PROMPT = f"""You are Uniraj Information Section, a professional Hindi-fir
 Answer in simple Hindi/Hinglish unless English is requested.
 Understand spelling mistakes and short student messages.
 Use conversation history naturally.
-Never invent official dates, marks, notices, syllabus details or results.
+IMPORTANT: For current university information, use only VERIFIED OFFICIAL UNIRAJ SOURCE DATA supplied in the prompt. Never invent dates, marks, notices, syllabus details or results.
+If official source data is unavailable, clearly say that the official site could not be reached and give the official link instead of guessing.
 For personal result questions, give the official result portal and Result Help group; never claim to access private marks.
 For guess-paper questions, mention both free guess-paper channels.
 If asked who made the bot, say it was made and powered by KESHAV MADHAV.
@@ -55,46 +58,52 @@ Free Guess Papers: {GUESS_1} and {GUESS_2}
 Result Help: {RESULT_HELP}
 """
 
-# ================= TELEGRAM =================
-def send_message(chat_id, text, reply_markup=None):
+# ================= TELEGRAM UI =================
+# The large inline keyboard is NOT attached to every answer anymore.
+# Telegram's native Menu button beside the message box is used instead.
+MENU_COMMANDS = [
+    ("updates", "📢 Uniraj latest updates"),
+    ("exam", "📝 Exam information"),
+    ("result", "🏆 Result portal/help"),
+    ("admission", "🎓 Admission information"),
+    ("syllabus", "📘 Official syllabus"),
+    ("guess", "📚 Free guess papers"),
+    ("ask", "🤖 Ask Uniraj AI"),
+    ("help", "ℹ️ Help"),
+    ("reset", "♻️ Reset chat memory"),
+]
+
+
+def send_message(chat_id, text):
     payload = {
         "chat_id": chat_id,
         "text": str(text)[:4096],
         "disable_web_page_preview": False,
     }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=15)
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
     r.raise_for_status()
     return r.json()
 
 
-def menu_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "📌 आज के अपडेट", "callback_data": "today"}, {"text": "📢 All Updates", "callback_data": "updates"}],
-        [{"text": "📝 Exam", "callback_data": "exam"}, {"text": "🏆 Result", "callback_data": "result"}],
-        [{"text": "🎓 Admission", "callback_data": "admission"}, {"text": "📘 Syllabus", "callback_data": "syllabus"}],
-        [{"text": "📚 Guess Papers", "callback_data": "guess"}, {"text": "🤖 Ask Uniraj AI", "callback_data": "ask"}],
-        [{"text": "ℹ️ Help", "callback_data": "help"}, {"text": "🔗 Official Sources", "callback_data": "official"}],
-    ]}
+def configure_telegram_menu():
+    """Put Menu next to the message box instead of sending buttons with every reply."""
+    try:
+        commands = [{"command": c, "description": d} for c, d in MENU_COMMANDS]
+        r1 = requests.post(f"{TELEGRAM_API}/setMyCommands", json={"commands": commands}, timeout=8)
+        r1.raise_for_status()
+        # Bot API Menu button opens the command list.
+        r2 = requests.post(
+            f"{TELEGRAM_API}/setChatMenuButton",
+            json={"menu_button": {"type": "commands"}},
+            timeout=8,
+        )
+        r2.raise_for_status()
+        logging.info("Telegram native Menu configured")
+    except Exception as exc:
+        logging.warning("Telegram Menu setup failed: %s", exc)
 
 
-def callback_answer(data):
-    answers = {
-        "today": f"📌 आज के Uniraj updates के लिए official notices देखें:\n{UNIRAJ_NOTICES}\n\nआप अपना course/semester लिखकर भी सवाल पूछ सकते हैं।",
-        "updates": f"📢 Uniraj official updates:\n{UNIRAJ_NOTICES}\n\nExam, result, admission और forms से जुड़ा सवाल भी पूछ सकते हैं।",
-        "exam": "📝 Exam\n\nअपना course + semester लिखें, जैसे: BSc 3rd semester exam dates",
-        "result": f"🏆 Official Result:\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}",
-        "admission": f"🎓 Official Admission:\n{UNIRAJ_ADMISSION}",
-        "syllabus": f"📘 Official Syllabus Index:\n{UNIRAJ_SYLLABUS}\n\nB.Sc. Maths Group 2025-26 PDF:\n{BSC_MATHS_2025_26_PDF}",
-        "guess": f"📚 Free Uniraj Guess Papers:\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}",
-        "ask": "🤖 अपना Uniraj सवाल सीधे भेजें।",
-        "help": "ℹ️ उदाहरण:\n• BSc 3rd semester Maths syllabus भेजो\n• मेरा Uniraj result कहाँ मिलेगा?\n• आज की Uniraj notice कहाँ है?\n• Guess paper कहाँ मिलेगा?",
-        "official": f"🔗 Official Sources\n\nUniversity: {UNIRAJ_HOME}\nSyllabus: {UNIRAJ_SYLLABUS}\nResult: {UNIRAJ_RESULT}\nAdmission: {UNIRAJ_ADMISSION}\nNotices: {UNIRAJ_NOTICES}",
-    }
-    return answers.get(data, "अपना सवाल भेजें।")
-
-# ================= QUICK OFFLINE REPLIES =================
+# ================= QUICK REPLIES =================
 def quick_reply(text):
     q = text.lower()
     if any(x in q for x in ["guess paper", "guesspaper", "guess papers", "गेस पेपर"]):
@@ -111,23 +120,85 @@ def quick_reply(text):
         return f"📘 Official Uniraj Syllabus Index:\n{UNIRAJ_SYLLABUS}"
     return None
 
+
+# ================= OFFICIAL UNIRAJ LOOKUP =================
+OFFICIAL_CACHE = {}
+CACHE_SECONDS = 90
+
+
+def fetch_official(url, timeout=3):
+    now = time.time()
+    cached = OFFICIAL_CACHE.get(url)
+    if cached and now - cached[0] < CACHE_SECONDS:
+        return cached[1]
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "UnirajInformationBot/2.0"})
+    r.raise_for_status()
+    html = r.text
+    OFFICIAL_CACHE[url] = (now, html)
+    return html
+
+
+def official_source_for(text):
+    q = text.lower()
+    syllabus = any(x in q for x in ["syllabus", "सिलेबस", "पाठ्यक्रम"])
+    current = any(x in q for x in ["latest", "today", "aaj", "current", "abhi", "update", "notice", "notification", "exam date", "exam dates", "date", "timetable", "time table", "last date", "आज", "अभी", "अपडेट", "नोटिस", "तिथि", "अंतिम तिथि"])
+    admission = any(x in q for x in ["admission", "प्रवेश"])
+
+    if syllabus and any(x in q for x in ["math", "mathematics", "गणित"]):
+        return f"VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}"
+
+    if syllabus:
+        try:
+            html = fetch_official(UNIRAJ_SYLLABUS)
+            soup = BeautifulSoup(html, "html.parser")
+            matches = []
+            for a in soup.find_all("a", href=True):
+                title = " ".join(a.stripped_strings).strip()
+                href = a.get("href", "")
+                if not title:
+                    continue
+                if any(w in (title + " " + href).lower() for w in q.split() if len(w) > 2):
+                    matches.append(f"- {title}: {href}")
+            if matches:
+                return "VERIFIED OFFICIAL UNIRAJ SYLLABUS PAGE DATA:\n" + "\n".join(matches[:10])
+        except Exception as exc:
+            logging.info("Official syllabus lookup unavailable: %s", exc)
+        return f"OFFICIAL SYLLABUS INDEX: {UNIRAJ_SYLLABUS}\nB.Sc Maths known official PDF: {BSC_MATHS_2025_26_PDF}"
+
+    if current:
+        try:
+            html = fetch_official(UNIRAJ_NOTICES)
+            soup = BeautifulSoup(html, "html.parser")
+            text_data = " ".join(soup.stripped_strings)
+            return f"VERIFIED OFFICIAL UNIRAJ NOTICES PAGE: {UNIRAJ_NOTICES}\nOFFICIAL PAGE TEXT EXCERPT:\n{text_data[:9000]}"
+        except Exception as exc:
+            logging.info("Official notices lookup unavailable: %s", exc)
+            return f"OFFICIAL UNIRAJ NOTICES: {UNIRAJ_NOTICES}\nThe official website is temporarily slow/unavailable. Do not guess current information."
+
+    if admission:
+        return f"VERIFIED OFFICIAL ADMISSION PORTAL: {UNIRAJ_ADMISSION}"
+    return ""
+
+
 # ================= GEMINI =================
-def make_prompt(user_text, chat_id):
+def make_prompt(user_text, chat_id, official_data=""):
     history = USER_HISTORY.get(chat_id, [])[-MAX_HISTORY:]
     parts = [f"SYSTEM: {SYSTEM_PROMPT}"]
+    if official_data:
+        parts.append("VERIFIED OFFICIAL UNIRAJ DATA:\n" + official_data)
     for role, msg in history:
         parts.append(f"{role.upper()}: {msg}")
     parts.append(f"STUDENT: {user_text}")
     return "\n\n".join(parts)
 
 
-def request_gemini(user_text, chat_id, model):
+def request_gemini(user_text, chat_id, model, official_data=""):
     if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing hai")
+        raise RuntimeError("Gemini unavailable")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": make_prompt(user_text, chat_id)}]}],
-        "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.2},
+        "contents": [{"role": "user", "parts": [{"text": make_prompt(user_text, chat_id, official_data)}]}],
+        "generationConfig": {"maxOutputTokens": 900, "temperature": 0.2},
     }
     r = requests.post(
         url,
@@ -142,8 +213,13 @@ def request_gemini(user_text, chat_id, model):
     parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
     answer = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
     if not answer:
-        raise RuntimeError(f"Gemini {model} returned empty response")
+        raise RuntimeError("Empty Gemini response")
     return answer
+
+
+def is_transient(exc):
+    s = str(exc)
+    return any(f"HTTP {code}" in s for code in [429, 500, 502, 503, 504])
 
 
 def ai_reply(user_text, chat_id):
@@ -151,27 +227,36 @@ def ai_reply(user_text, chat_id):
     if quick:
         return quick
 
-    # Try the configured model first, then known current lightweight models.
-    models = []
-    for model in [GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]:
-        if model and model not in models:
-            models.append(model)
-
+    official_data = official_source_for(user_text)
+    # One current model only. Do not waste time trying obsolete models.
+    # Retry only transient backend overload/errors with short exponential backoff.
+    delays = [0.0, 1.0, 2.5]
     last_error = None
-    for model in models:
+    for delay in delays:
+        if delay:
+            time.sleep(delay)
         try:
-            answer = request_gemini(user_text, chat_id, model)
-            logging.info("Gemini success model=%s", model)
+            answer = request_gemini(user_text, chat_id, GEMINI_MODEL, official_data)
+            logging.info("Gemini success model=%s", GEMINI_MODEL)
             return answer
         except Exception as exc:
             last_error = exc
-            logging.warning("Gemini model %s failed: %s", model, exc)
+            logging.warning("Gemini request failed: %s", exc)
+            if not is_transient(exc):
+                break
 
-    logging.error("All Gemini models failed: %s", last_error)
-    return (
-        "⚠️ अभी Gemini AI से reply नहीं मिल पाया।\n\n"
-        "आप चाहें तो Syllabus, Result, Admission या Guess Paper लिखें—उनके verified links अभी उपलब्ध हैं।"
-    )
+    # Never expose provider/API/technical errors to students.
+    logging.error("AI unavailable after retries: %s", last_error)
+    return "अभी आपका सवाल थोड़ा व्यस्त समय में आया है। मैं इसे दोबारा लेने के लिए तैयार हूँ—कृपया वही सवाल एक बार फिर भेजें।"
+
+
+# ================= INDIRECT CHANNEL PROMOTION =================
+def maybe_add_promotion(chat_id, reply):
+    count = len(USER_HISTORY.get(chat_id, [])) // 2
+    if count > 0 and count % PROMO_EVERY == 0:
+        return reply + f"\n\n📚 **Free Study Material:** {GUESS_1}\n📖 Guess Papers: {GUESS_2}"
+    return reply
+
 
 # ================= WEBHOOK =================
 def configure_webhook():
@@ -180,13 +265,33 @@ def configure_webhook():
         return
     try:
         webhook_url = render_url.rstrip("/") + "/telegram/webhook"
-        r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=10)
+        r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=8)
         r.raise_for_status()
         logging.info("Telegram webhook configured: %s", webhook_url)
-    except Exception:
-        logging.exception("Failed to configure Telegram webhook")
+    except Exception as exc:
+        logging.warning("Webhook setup failed: %s", exc)
+
 
 configure_webhook()
+configure_telegram_menu()
+
+# ================= COMMAND HANDLER =================
+def command_reply(command, chat_id):
+    answers = {
+        "updates": f"📢 Uniraj Official Notices:\n{UNIRAJ_NOTICES}\n\nCurrent information के लिए अपना course/semester लिखें।",
+        "exam": "📝 Exam\n\nअपना course + semester लिखें, जैसे: BSc 3rd semester exam dates",
+        "result": f"🏆 Official Result:\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}",
+        "admission": f"🎓 Official Admission:\n{UNIRAJ_ADMISSION}",
+        "syllabus": f"📘 Official Syllabus Index:\n{UNIRAJ_SYLLABUS}\n\nB.Sc. Maths Group 2025-26 PDF:\n{BSC_MATHS_2025_26_PDF}",
+        "guess": f"📚 Free Uniraj Guess Papers:\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}",
+        "ask": "🤖 अपना Uniraj सवाल सीधे message में भेजें।",
+        "help": "ℹ️ आप Menu खोलकर Exam, Result, Admission, Syllabus, Guess Papers या AI चुन सकते हैं। या अपना सवाल सीधे लिख सकते हैं।",
+    }
+    if command == "reset":
+        USER_HISTORY.pop(chat_id, None)
+        return "♻️ आपकी recent chat memory reset कर दी गई है।"
+    return answers.get(command, "अपना सवाल सीधे लिखें।")
+
 
 # ================= ROUTES =================
 @app.get("/")
@@ -197,7 +302,9 @@ def health():
         "status": "running",
         "ai": "Gemini",
         "model": GEMINI_MODEL,
-        "build": "2026-09-10-gemini-3.5-fix",
+        "telegram_menu": True,
+        "official_uniraj_lookup": True,
+        "build": "2026-09-10-menu-fast-official-v2",
     })
 
 
@@ -205,21 +312,6 @@ def health():
 def telegram_webhook():
     try:
         update = request.get_json(silent=True) or {}
-
-        callback = update.get("callback_query")
-        if callback:
-            callback_id = callback.get("id")
-            chat_id = callback.get("message", {}).get("chat", {}).get("id")
-            data = callback.get("data", "")
-            if callback_id:
-                try:
-                    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={"callback_query_id": callback_id}, timeout=5)
-                except Exception:
-                    pass
-            if chat_id:
-                send_message(chat_id, callback_answer(data), menu_keyboard())
-            return jsonify({"ok": True})
-
         message = update.get("message")
         if not message:
             return jsonify({"ok": True})
@@ -238,18 +330,28 @@ def telegram_webhook():
                 chat_id,
                 "🎓 Uniraj Information Section में आपका स्वागत है!\n\n"
                 "Rajasthan University से जुड़े syllabus, exam, result, admission, notices और study questions पूछें।\n\n"
-                "⚡ Powered by KESHAV MADHAV",
-                menu_keyboard(),
+                "⚡ Powered by KESHAV MADHAV\n\n"
+                "नीचे/पास वाले **Menu** से सभी options कभी भी खोल सकते हैं।",
             )
             return jsonify({"ok": True})
 
         if text.startswith("/reset"):
-            USER_HISTORY.pop(chat_id, None)
-            send_message(chat_id, "♻️ आपकी recent chat memory reset कर दी गई है।", menu_keyboard())
+            send_message(chat_id, command_reply("reset", chat_id))
             return jsonify({"ok": True})
 
+        if text.startswith("/"):
+            command = text.split()[0][1:].split("@")[0].lower()
+            if command in {c for c, _ in MENU_COMMANDS}:
+                send_message(chat_id, command_reply(command, chat_id))
+                return jsonify({"ok": True})
+
+        # Show Telegram's typing indicator while AI works. Telegram supports this action natively.
         try:
-            requests.post(f"{TELEGRAM_API}/sendChatAction", json={"chat_id": chat_id, "action": "typing"}, timeout=5)
+            requests.post(
+                f"{TELEGRAM_API}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+                timeout=3,
+            )
         except Exception:
             pass
 
@@ -257,10 +359,14 @@ def telegram_webhook():
         USER_HISTORY.setdefault(chat_id, []).append(("Student", text))
         USER_HISTORY.setdefault(chat_id, []).append(("Bot", reply))
         USER_HISTORY[chat_id] = USER_HISTORY[chat_id][-MAX_HISTORY:]
-        send_message(chat_id, reply, menu_keyboard())
+
+        # Promote study channels occasionally, not on every message.
+        reply = maybe_add_promotion(chat_id, reply)
+        send_message(chat_id, reply)
         return jsonify({"ok": True})
 
     except Exception:
+        # Keep technical errors out of the student's chat; retain them in server logs.
         logging.exception("Telegram webhook failed")
         return jsonify({"ok": True})
 
