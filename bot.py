@@ -9,10 +9,6 @@ app = Flask(__name__)
 
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-
-# Gemini 2.5 Flash is no longer available to this API key.
-# Keep the production bot pinned to the current stable Gemini 3.6 Flash
-# instead of allowing an old Render GEMINI_MODEL variable to override it.
 GEMINI_MODEL = "gemini-3.6-flash"
 
 if not BOT_TOKEN:
@@ -23,10 +19,31 @@ if not GEMINI_API_KEY:
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
-SYSTEM_PROMPT = """You are Keshav Study Bot for Rajasthan University students.
-Answer in clear Hindi/Hinglish. Help with Uniraj exams, results, dates, fees, marks, semester, timetable, admission and study questions.
-Never invent official university dates or notices. If current official information is not available, clearly say it should be verified on the official Uniraj website.
-Keep answers useful, concise and well formatted with emojis when appropriate."""
+# Temporary per-process context so the bot understands which menu the student just used.
+USER_CONTEXT = {}
+
+SYSTEM_PROMPT = """You are Keshav Study Bot, a helpful Hindi-first assistant for Rajasthan University (Uniraj) students.
+
+Your job:
+- Understand Hindi, Hinglish, English, spelling mistakes, and very short/incomplete student messages.
+- Help with BSc/BA/BCom/MSc and other Uniraj study, semester, exam, result, admission, fees, dates, timetable and syllabus questions.
+- If the student gives a course/semester/subject, use those details in the answer.
+- Never give a generic introduction like 'Ram Ram! Main Keshav Study Bot hoon' unless the student is greeting or asking who you are.
+- Do NOT repeat the student's question. Answer it directly.
+- Give a complete, useful answer. Do not stop after 'B.' or an unfinished sentence.
+- If the student's message is genuinely incomplete and you cannot safely infer the exact question, ask ONE short clarification question in Hindi/Hinglish instead of inventing details.
+- For syllabus, exam pattern, dates, results, fees, notices or other official/current Uniraj facts, never invent information. If you do not have verified current information, clearly say that it needs verification from the official Uniraj source.
+- For study questions, you can explain concepts, make notes, give formulas, important topics, preparation plans and practice questions.
+- Prefer simple Hindi with English subject terms where students normally use them.
+- Use short headings and bullets when useful. Keep normal answers concise but informative.
+- If the student says something like 'BSc 2nd semester Math group me', understand it as context and ask what they want (syllabus, important topics, notes, exam, result, etc.) only if the request is actually incomplete.
+
+Official sources:
+Uniraj main: https://www.uniraj.ac.in/
+Result: https://result.uniraj.ac.in/
+Admission: https://admissions.uniraj.ac.in/
+
+Do not claim that you checked a website unless you actually have access to that information in this request."""
 
 
 def send_message(chat_id, text, reply_markup=None):
@@ -42,12 +59,13 @@ def send_message(chat_id, text, reply_markup=None):
     return r.json()
 
 
-def ai_reply(user_text):
-    prompt = f"{SYSTEM_PROMPT}\n\nStudent's question:\n{user_text}"
+def ai_reply(user_text, menu_context=""):
+    context_line = f"\n\nThe student recently selected this menu: {menu_context}" if menu_context else ""
+    prompt = f"{SYSTEM_PROMPT}{context_line}\n\nStudent's message:\n{user_text}\n\nNow answer the student directly."
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
-            "maxOutputTokens": 800,
+            "maxOutputTokens": 1000,
         },
     }
     headers = {
@@ -106,7 +124,7 @@ def ai_reply(user_text):
         raise RuntimeError("Gemini returned no answer")
 
     parts = candidates[0].get("content", {}).get("parts", [])
-    text = "".join(p.get("text", "") for p in parts).strip()
+    text = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
     if not text:
         raise RuntimeError("Gemini returned empty text")
     return text
@@ -175,7 +193,7 @@ def health():
         "status": "running",
         "ai": "Gemini REST",
         "model": GEMINI_MODEL,
-        "build": "2026-09-10-gemini-3.6-fix",
+        "build": "2026-09-10-ai-answer-fix",
     })
 
 
@@ -186,7 +204,9 @@ def webhook():
         if "callback_query" in update:
             cb = update["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
-            text = answer_callback(cb.get("data", ""))
+            data = cb.get("data", "")
+            USER_CONTEXT[chat_id] = data
+            text = answer_callback(data)
             send_message(chat_id, text)
             requests.post(
                 f"{TELEGRAM_API}/answerCallbackQuery",
@@ -207,6 +227,7 @@ def webhook():
             return jsonify({"ok": True})
 
         if text.startswith("/start"):
+            USER_CONTEXT.pop(chat_id, None)
             welcome = "🎓 Keshav Study Bot में आपका स्वागत है!\n\nRajasthan University की पढ़ाई और updates के लिए अपना सवाल भेजें या नीचे menu चुनें।"
             send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
@@ -221,7 +242,8 @@ def webhook():
             pass
 
         try:
-            reply = ai_reply(text)
+            menu_context = USER_CONTEXT.get(chat_id, "")
+            reply = ai_reply(text, menu_context)
         except Exception as ai_error:
             logging.exception("AI reply failed")
             error_text = str(ai_error)
