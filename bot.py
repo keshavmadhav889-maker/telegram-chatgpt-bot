@@ -12,17 +12,17 @@ app = Flask(__name__)
 
 # ================== CONFIG ==================
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+# OpenAI is kept only as an optional emergency fallback; Gemini is primary.
 OPENAI_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip().rstrip("/")
 OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
 
-# Legacy/Replit-compatible variables are supported but are no longer preferred.
 INTEGRATION_KEY = (os.getenv("AI_INTEGRATIONS_OPENAI_API_KEY") or "").strip()
 INTEGRATION_BASE_URL = (os.getenv("AI_INTEGRATIONS_OPENAI_BASE_URL") or "").strip().rstrip("/")
 INTEGRATION_MODEL = (os.getenv("AI_MODEL") or "").strip()
 
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
 NEWS_API_KEY = (os.getenv("NEWS_API_KEY") or "").strip()
 
 ADMIN_IDS = {8280167872}
@@ -30,7 +30,7 @@ IGNORED_BOT_IDS = {609517172}
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN missing hai")
-if not OPENAI_KEY and not INTEGRATION_KEY and not GEMINI_API_KEY:
+if not GEMINI_API_KEY and not OPENAI_KEY and not INTEGRATION_KEY:
     logging.warning("No AI provider configured. Offline Uniraj fallback will still work.")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -44,8 +44,6 @@ UNIRAJ_ADMISSION = "https://admissions.uniraj.ac.in/"
 GUESS_1 = "https://t.me/Uniraj_GuessPapers"
 GUESS_2 = "https://t.me/Unirajguesspaper"
 RESULT_HELP = "https://t.me/Unirajresult499"
-
-# Verified direct syllabus PDF supplied from the official Uniraj syllabus index.
 BSC_MATHS_2025_26_PDF = (
     "https://uniraj.ac.in/student/syl_N/UP_SYL_2025-26/"
     "Maths_UG0803_%28Maths_Group%29%20I%20to%20VI%202025-26%20%20SCiencee.pdf"
@@ -57,7 +55,6 @@ AI_TIMEOUT = 35
 USER_HISTORY = {}
 
 SYSTEM_PROMPT = f"""You are Uniraj Information Section, a professional Hindi-first assistant for Rajasthan University students.
-
 Rules:
 - Answer in simple Hindi/Hinglish unless English is requested.
 - Use recent conversation context; do not restart unnecessarily.
@@ -68,7 +65,6 @@ Rules:
 - For personal results, never invent marks or claim login access. Give the official portal and Result Help group.
 - For guess-paper requests, mention both free guess-paper channels.
 - If asked who made the bot, say: यह bot KESHAV MADHAV द्वारा बनाया और powered है।
-
 Official sources:
 University: {UNIRAJ_HOME}
 Syllabus index: {UNIRAJ_SYLLABUS}
@@ -83,11 +79,7 @@ Result Help: {RESULT_HELP}
 
 # ================== TELEGRAM ==================
 def send_message(chat_id, text, reply_markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "text": str(text)[:4096],
-        "disable_web_page_preview": False,
-    }
+    payload = {"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=15)
@@ -165,11 +157,8 @@ def official_context(user_text):
     syllabus_terms = ["syllabus", "सिलेबस", "पाठ्यक्रम", "course syllabus"]
     result_terms = ["result", "रिजल्ट", "परिणाम"]
     current_terms = ["latest", "today", "aaj", "current", "abhi", "update", "notice", "notification", "exam date", "exam dates", "date", "timetable", "time table", "admission", "fee", "fees", "form", "last date", "परीक्षा", "समय सारणी", "नोटिस", "प्रवेश", "फीस", "आज", "अभी", "अपडेट", "तिथि", "अंतिम तिथि"]
-
-    # Fast path: the verified direct B.Sc. Maths PDF should not depend on the slow university website.
     if any(t in q for t in syllabus_terms) and any(x in q for x in ["math", "mathematics", "गणित"]):
         return f"VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}"
-
     if any(t in q for t in syllabus_terms):
         try:
             links = find_official_syllabus(user_text)
@@ -180,10 +169,8 @@ def official_context(user_text):
         except Exception:
             logging.exception("Syllabus lookup failed")
         return f"OFFICIAL SYLLABUS INDEX: {UNIRAJ_SYLLABUS}\nNo verified matching PDF was extracted. Do not invent details."
-
     if any(t in q for t in result_terms):
         return f"OFFICIAL RESULT PORTAL: {UNIRAJ_RESULT}\nRESULT HELP GROUP: {RESULT_HELP}"
-
     if any(t in q for t in current_terms):
         try:
             html = fetch_official_page(UNIRAJ_NOTICES)
@@ -196,7 +183,6 @@ def official_context(user_text):
         except Exception:
             logging.exception("Official notice lookup failed")
             return f"OFFICIAL UNIRAJ: {UNIRAJ_HOME}\nOFFICIAL NOTICES: {UNIRAJ_NOTICES}\nThe official lookup failed; do not guess current information."
-
     return ""
 
 # ================== NEWS ==================
@@ -279,7 +265,7 @@ def request_openai(messages):
 
 def request_gemini(messages):
     if not GEMINI_API_KEY:
-        raise RuntimeError("Gemini fallback is not configured")
+        raise RuntimeError("Gemini provider is not configured")
     prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 1200, "temperature": 0.2}}
@@ -296,32 +282,30 @@ def request_gemini(messages):
 
 
 def ai_reply(user_text, chat_id, menu_context=""):
-    # First give reliable deterministic answers for common Uniraj queries.
     quick = offline_reply(user_text)
-    generic_offline = quick.startswith("⏳ AI service")
-    if not generic_offline:
+    if not quick.startswith("⏳ AI service"):
         return quick
 
     messages = build_messages(user_text, chat_id, menu_context)
-    openai_error = None
-    try:
-        text, provider, model = request_openai(messages)
-        logging.info("AI success provider=%s model=%s", provider, model)
-        return text
-    except Exception as exc:
-        openai_error = str(exc)
-        logging.warning("Primary AI provider failed: %s", exc)
 
+    # Gemini is PRIMARY so an exhausted OpenAI account cannot block replies.
     try:
         text, provider, model = request_gemini(messages)
-        logging.info("AI fallback success provider=%s model=%s", provider, model)
+        logging.info("AI success provider=%s model=%s", provider, model)
         return text
-    except Exception as exc:
-        logging.warning("Gemini fallback failed: %s", exc)
+    except Exception as gemini_error:
+        logging.warning("Primary Gemini provider failed: %s", gemini_error)
 
-    if "credit_balance_exhausted" in (openai_error or "") or "no credits remaining" in (openai_error or "").lower():
-        return "⚠️ AI provider का API credit balance खत्म है।\n\nलेकिन Uniraj के syllabus/result/admission/notice/guess-paper वाले verified links अभी भी उपलब्ध हैं।"
-    return offline_reply(user_text)
+    # Optional OpenAI fallback, only if it is configured and has available quota.
+    if OPENAI_KEY or (INTEGRATION_KEY and INTEGRATION_BASE_URL):
+        try:
+            text, provider, model = request_openai(messages)
+            logging.info("AI fallback success provider=%s model=%s", provider, model)
+            return text
+        except Exception as openai_error:
+            logging.warning("OpenAI fallback failed: %s", openai_error)
+
+    return "⚠️ अभी AI की free limit पूरी हो गई है या AI service temporarily unavailable है। थोड़ी देर बाद दोबारा try करें।\n\nUniraj के verified syllabus/result/admission/notice/guess-paper links अभी भी उपलब्ध हैं।"
 
 # ================== WEBHOOK ==================
 def configure_webhook():
@@ -341,24 +325,15 @@ configure_webhook()
 # ================== ROUTES ==================
 @app.get("/")
 def health():
-    if OPENAI_KEY:
+    if GEMINI_API_KEY:
+        provider, model = "Gemini", GEMINI_MODEL
+    elif OPENAI_KEY:
         provider, model = "OpenAI SDK", OPENAI_MODEL
     elif INTEGRATION_KEY and INTEGRATION_BASE_URL:
         provider, model = "OpenAI-compatible integration", INTEGRATION_MODEL or "gpt-4o-mini"
-    elif GEMINI_API_KEY:
-        provider, model = "Gemini", GEMINI_MODEL
     else:
         provider, model = "offline fallback", "none"
-    return jsonify({
-        "ok": True,
-        "service": "Uniraj Information Section",
-        "status": "running",
-        "ai": provider,
-        "model": model,
-        "official_web_lookup": True,
-        "offline_fallback": True,
-        "build": "2026-09-10-hardened",
-    })
+    return jsonify({"ok": True, "service": "Uniraj Information Section", "status": "running", "ai": provider, "model": model, "official_web_lookup": True, "offline_fallback": True, "build": "2026-09-10-gemini-primary"})
 
 
 @app.post("/telegram/webhook")
