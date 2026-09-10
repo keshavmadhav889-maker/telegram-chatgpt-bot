@@ -22,7 +22,6 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import re
 
           p = Path('bot.py')
           s = p.read_text(encoding='utf-8')
@@ -45,13 +44,19 @@ def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
             logging.warning("Could not notify admin about AI failure: %s", exc)
 '''
 
-          # Replace the previously malformed helper, if present; otherwise insert it.
-          if '# ADMIN_AI_FAILURE_ALERT_V1' in s:
-              s = re.sub(r'\\n\\n# ADMIN_AI_FAILURE_ALERT_V1.*?def configure_telegram_menu\(\):', helper + '\ndef configure_telegram_menu():', s, count=1, flags=re.S)
+          marker = '# ADMIN_AI_FAILURE_ALERT_V1'
+          if marker in s:
+              start = s.find(r'\\n\\n' + marker)
+              if start < 0:
+                  start = s.find(marker)
+              end = s.find('def configure_telegram_menu():', start)
+              if end < 0:
+                  raise SystemExit('configure menu anchor missing')
+              s = s[:start] + helper + '\ndef configure_telegram_menu():' + s[end + len('def configure_telegram_menu():'):]
           else:
               anchor = '\ndef configure_telegram_menu():'
               if anchor not in s:
-                  raise SystemExit('configure_telegram_menu anchor not found')
+                  raise SystemExit('configure menu anchor missing')
               s = s.replace(anchor, helper + anchor, 1)
 
           new_func = '''def ai_reply(user_text, chat_id):
@@ -82,11 +87,11 @@ def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
 '''
 
           start = s.find('def ai_reply(user_text, chat_id):')
-          end_marker = '\n# ================= INDIRECT CHANNEL PROMOTION ================='
-          end = s.find(end_marker, start)
+          marker2 = '# ================= INDIRECT CHANNEL PROMOTION ================='
+          end = s.find(marker2, start)
           if start < 0 or end < 0:
-              raise SystemExit('ai_reply section not found')
-          s = s[:start] + new_func + s[end:]
+              raise SystemExit('ai_reply section missing')
+          s = s[:start] + new_func + '\n' + s[end:]
 
           p.write_text(s, encoding='utf-8')
           PY
@@ -99,3 +104,5 @@ def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
           git add bot.py
           git diff --cached --quiet || git commit -m 'Fix admin AI alert syntax error'
           git push
+
+# repair trigger
