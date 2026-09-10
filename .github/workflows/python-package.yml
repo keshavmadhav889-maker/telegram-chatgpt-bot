@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -46,6 +49,14 @@ jobs:
         p.write_text(s, encoding="utf-8")
         PY
         python -m py_compile bot.py
+    - name: Save repair to GitHub
+      if: github.event_name == 'push' && github.actor != 'github-actions[bot]'
+      run: |
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        git add bot.py
+        git diff --cached --quiet || git commit -m 'Repair bot.py syntax'
+        git push
     - name: Lint with flake8
       run: |
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
