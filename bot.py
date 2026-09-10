@@ -8,14 +8,24 @@ logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
 BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+
+# Replit-style OpenAI-compatible AI Integration.
+# Replit normally provisions these automatically; on Render they must be supplied
+# explicitly in the service environment if this provider is to be used.
+OPENAI_API_KEY = (os.getenv("AI_INTEGRATIONS_OPENAI_API_KEY") or "").strip()
+OPENAI_BASE_URL = (os.getenv("AI_INTEGRATIONS_OPENAI_BASE_URL") or "").strip().rstrip("/")
+OPENAI_MODEL = (os.getenv("AI_MODEL") or "gpt-4o").strip()
+
+# Gemini remains an optional fallback so the bot can still answer if the
+# OpenAI-compatible integration is unavailable.
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.8-flash").strip()
 GEMINI_FALLBACK_MODELS = [GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-3.6-flash"]
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
+if not OPENAI_API_KEY and not GEMINI_API_KEY:
+    raise RuntimeError("Configure Replit-style AI_INTEGRATIONS_OPENAI_API_KEY/BASE_URL or GEMINI_API_KEY")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -27,8 +37,8 @@ SYSTEM_PROMPT = """You are Uniraj Information Section, a professional Hindi-firs
 
 You must behave like a real conversational assistant, not like a fresh chatbot on every message.
 - Understand Hindi, Hinglish, English, spelling mistakes, and short student messages.
-- REMEMBER the immediately previous conversation. If you asked the student a clarification question, interpret the student's next reply as the answer to that question.
-- NEVER ask again what the student wants when the previous assistant message already asked a specific question and the student answered it.
+- Remember the immediately previous conversation. If you asked the student a clarification question, interpret the student's next reply as the answer.
+- Never ask again what the student wants when the previous assistant message already asked a specific question and the student answered it.
 - Do not restart with an introduction on every message.
 - Do not repeat the student's question.
 - Give a complete, direct answer.
@@ -36,11 +46,16 @@ You must behave like a real conversational assistant, not like a fresh chatbot o
 - For current/official facts such as result dates, exam dates, fees, notices and syllabus, do not invent information. Use verified official information when available; otherwise clearly say it needs verification.
 - For study questions, explain concepts, formulas, notes, important topics and preparation clearly.
 - If a student asks for a syllabus, never create a fake syllabus. Only provide verified/current syllabus information or the official PDF when available.
-- If a student asks about a personal result, direct them to the official result portal or the configured Result Help service; never fabricate marks or a result.
+- If a student asks about a personal result, direct them to the official result portal or configured Result Help service; never fabricate marks or a result.
 - If the student is unhappy with an answer, apologize briefly and offer the configured student-help group.
 - If asked who made the bot, say it was made/powered by KESHAV MADHAV.
 - If asked for guess papers, naturally mention that free guess papers are available through the configured Uniraj Guess Papers channels.
 - Keep answers concise but useful, with headings/bullets when helpful.
+
+Useful channels:
+Free Guess Papers: https://t.me/Uniraj_GuessPapers
+Uniraj Guess Papers: https://t.me/Unirajguesspaper
+Result Help: https://t.me/Unirajresult499
 
 Official sources:
 Uniraj: https://www.uniraj.ac.in/
@@ -51,7 +66,11 @@ Do not claim you checked a website unless verified information was actually supp
 
 
 def send_message(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": True}
+    payload = {
+        "chat_id": chat_id,
+        "text": str(text)[:4096],
+        "disable_web_page_preview": True,
+    }
     if reply_markup:
         payload["reply_markup"] = reply_markup
     r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=20)
@@ -59,18 +78,87 @@ def send_message(chat_id, text, reply_markup=None):
     return r.json()
 
 
+def request_openai_compatible(prompt):
+    if not OPENAI_API_KEY or not OPENAI_BASE_URL:
+        raise RuntimeError("Replit-style OpenAI integration is not configured")
+
+    # The Replit-managed integration exposes an OpenAI-compatible base URL.
+    # Accept either a base endpoint or one already ending in /chat/completions.
+    if OPENAI_BASE_URL.endswith("/chat/completions"):
+        url = OPENAI_BASE_URL
+    else:
+        url = OPENAI_BASE_URL + "/chat/completions"
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 900,
+        "temperature": 0.4,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    last_response = None
+    for attempt in range(2):
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+            last_response = r
+        except requests.RequestException as exc:
+            logging.exception("OpenAI-compatible network error")
+            if attempt == 0:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"OpenAI-compatible network error: {exc}") from exc
+
+        if r.ok:
+            break
+        if r.status_code in (408, 429, 500, 502, 503, 504) and attempt == 0:
+            time.sleep(1.5)
+            continue
+        break
+
+    if last_response is None:
+        raise RuntimeError("OpenAI-compatible request failed")
+
+    if not last_response.ok:
+        try:
+            data = last_response.json()
+            error = data.get("error", {})
+            message = error.get("message", "Unknown AI provider error") if isinstance(error, dict) else str(error)
+        except Exception:
+            message = last_response.text[:500]
+        logging.error("OpenAI-compatible error code=%s message=%s", last_response.status_code, message)
+        raise RuntimeError(f"OpenAI-compatible API {last_response.status_code}: {message}")
+
+    try:
+        data = last_response.json()
+        choices = data.get("choices", [])
+        text = choices[0].get("message", {}).get("content", "").strip() if choices else ""
+    except Exception as exc:
+        raise RuntimeError("Invalid OpenAI-compatible response") from exc
+
+    if not text:
+        raise RuntimeError("OpenAI-compatible provider returned empty text")
+    return text
+
+
 def request_gemini(model, prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 700},
+        "contents": [{"role": "user", "parts": [{"text": f"{SYSTEM_PROMPT}\n\n{prompt}"}]}],
+        "generationConfig": {"maxOutputTokens": 900},
     }
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
 
     last_response = None
     for attempt in range(2):
         try:
-            r = requests.post(url, headers=headers, json=payload, timeout=45)
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
             last_response = r
         except requests.RequestException as exc:
             logging.exception("Gemini network error model=%s", model)
@@ -81,7 +169,7 @@ def request_gemini(model, prompt):
 
         if r.ok:
             break
-        if r.status_code in (408, 500, 502, 503, 504) and attempt == 0:
+        if r.status_code in (408, 429, 500, 502, 503, 504) and attempt == 0:
             time.sleep(1)
             continue
         break
@@ -89,27 +177,22 @@ def request_gemini(model, prompt):
     if last_response is None:
         raise RuntimeError("Gemini request failed")
 
-    r = last_response
-    if not r.ok:
+    if not last_response.ok:
         try:
-            error_data = r.json().get("error", {})
+            error_data = last_response.json().get("error", {})
             error_message = error_data.get("message", "Unknown Gemini API error")
-            error_status = error_data.get("status", "")
         except Exception:
-            error_message = r.text[:500]
-            error_status = ""
-        logging.error("Gemini API error model=%s code=%s status=%s message=%s", model, r.status_code, error_status, error_message)
-        raise RuntimeError(f"Gemini API {r.status_code}: {error_message}")
+            error_message = last_response.text[:500]
+        raise RuntimeError(f"Gemini API {last_response.status_code}: {error_message}")
 
     try:
-        data = r.json()
+        data = last_response.json()
     except ValueError as exc:
         raise RuntimeError("Gemini returned invalid response") from exc
 
     candidates = data.get("candidates", [])
     if not candidates:
         raise RuntimeError("Gemini returned no answer")
-
     parts = candidates[0].get("content", {}).get("parts", [])
     text = "".join(p.get("text", "") for p in parts if p.get("text")).strip()
     if not text:
@@ -119,9 +202,9 @@ def request_gemini(model, prompt):
 
 def ai_reply(user_text, chat_id, menu_context=""):
     history = USER_HISTORY.get(chat_id, [])
-    context_line = f"\n\nRecently selected menu: {menu_context}" if menu_context else ""
+    context_line = f"\nRecently selected menu: {menu_context}" if menu_context else ""
     history_text = "".join(f"{role}: {text}\n" for role, text in history[-MAX_HISTORY:])
-    prompt = f"""{SYSTEM_PROMPT}{context_line}
+    prompt = f"""{context_line}
 
 Conversation so far:
 {history_text}
@@ -130,21 +213,35 @@ Student's latest message:
 
 Answer the latest message using the conversation context. If the previous assistant asked a question and this message is the student's answer, continue from that exact point. Do not ask 'aapko kya chahiye?' again unless the student's latest message is actually unrelated or incomplete."""
 
-    last_error = None
-    seen = set()
-    for model in GEMINI_FALLBACK_MODELS:
-        if not model or model in seen:
-            continue
-        seen.add(model)
+    # Primary: Replit-style OpenAI-compatible integration.
+    if OPENAI_API_KEY and OPENAI_BASE_URL:
         try:
-            return request_gemini(model, prompt)
+            return request_openai_compatible(prompt)
         except RuntimeError as exc:
-            last_error = exc
-            if " 429:" in str(exc):
-                logging.warning("Quota/rate limit on %s; trying fallback model", model)
+            logging.warning("Replit-style AI failed: %s", exc)
+            # If Gemini is configured, use it as a legitimate fallback.
+            if not GEMINI_API_KEY:
+                raise
+
+    # Optional fallback for environments where the Replit-style integration is absent.
+    if GEMINI_API_KEY:
+        last_error = None
+        seen = set()
+        for model in GEMINI_FALLBACK_MODELS:
+            if not model or model in seen:
                 continue
-            raise
-    raise last_error or RuntimeError("Gemini request failed")
+            seen.add(model)
+            try:
+                return request_gemini(model, prompt)
+            except RuntimeError as exc:
+                last_error = exc
+                if " 429:" in str(exc):
+                    logging.warning("Gemini quota/rate limit on %s; trying fallback", model)
+                    continue
+                raise
+        raise last_error or RuntimeError("Gemini request failed")
+
+    raise RuntimeError("No AI provider is configured")
 
 
 def menu_keyboard():
@@ -187,6 +284,7 @@ def configure_webhook():
     try:
         r = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=15)
         r.raise_for_status()
+        logging.info("Telegram webhook configured: %s", webhook_url)
     except Exception:
         logging.exception("Failed to configure Telegram webhook")
 
@@ -196,7 +294,24 @@ configure_webhook()
 
 @app.get("/")
 def health():
-    return jsonify({"ok": True, "service": "Uniraj Information Section", "status": "running", "ai": "Gemini REST", "model": GEMINI_MODEL, "fallbacks": GEMINI_FALLBACK_MODELS, "build": "2026-09-10-quota-fallback-fix"})
+    if OPENAI_API_KEY and OPENAI_BASE_URL:
+        provider = "Replit-style OpenAI-compatible"
+        model = OPENAI_MODEL
+    elif GEMINI_API_KEY:
+        provider = "Gemini REST fallback"
+        model = GEMINI_MODEL
+    else:
+        provider = "none"
+        model = "none"
+    return jsonify({
+        "ok": True,
+        "service": "Uniraj Information Section",
+        "status": "running",
+        "ai": provider,
+        "model": model,
+        "fallback": bool(GEMINI_API_KEY and OPENAI_API_KEY and OPENAI_BASE_URL),
+        "build": "2026-09-10-replit-openai-integration",
+    })
 
 
 @app.post("/telegram/webhook")
@@ -231,7 +346,7 @@ def webhook():
         if text.startswith("/start"):
             USER_CONTEXT.pop(chat_id, None)
             USER_HISTORY.pop(chat_id, None)
-            welcome = "🎓 Uniraj Information Section में आपका स्वागत है!\n\n📚 Rajasthan University की पढ़ाई, syllabus, exam, result, admission और updates के लिए अपना सवाल भेजें।\n\n⚡ Powered by KESHAV MADHAV"
+            welcome = "🎓 Uniraj Information Section में आपका स्वागत है!\n\n📚 Rajasthan University की पढ़ाई, syllabus, exam, result, admission और updates के लिए अपना सवाल भेजें।\n\n📝 Free Guess Papers: https://t.me/Uniraj_GuessPapers\n📢 Guess Papers: https://t.me/Unirajguesspaper\n\n⚡ Powered by KESHAV MADHAV"
             send_message(chat_id, welcome, menu_keyboard())
             return jsonify({"ok": True})
 
@@ -248,23 +363,24 @@ def webhook():
         except Exception as ai_error:
             logging.exception("AI reply failed")
             error_text = str(ai_error)
-            if " 401:" in error_text:
-                reply = "❌ Gemini API key invalid/expired है। Render में GEMINI_API_KEY check करें।"
-            elif " 403:" in error_text:
-                reply = "❌ Gemini API key को इस API/model की permission नहीं मिल रही। Google AI Studio की key और Render environment variable check करें।"
+            if " 401:" in error_text or " 403:" in error_text:
+                reply = "❌ AI service की authentication/permission में समस्या है। Admin को AI integration settings check करनी होंगी।"
             elif " 429:" in error_text:
-                reply = "⏳ Gemini की सभी configured models पर अभी quota/rate limit लगी हुई है। Google AI Studio में इसी project की quota देखें और थोड़ी देर बाद फिर कोशिश करें।"
+                reply = "⏳ AI service पर अभी rate limit/credit limit लगी हुई है। थोड़ी देर बाद फिर कोशिश करें।"
             elif " 404:" in error_text:
-                reply = "❌ Gemini model उपलब्ध नहीं मिला। Render को latest GitHub commit पर redeploy करें।"
+                reply = "❌ AI model/endpoint उपलब्ध नहीं है। Admin को AI integration model और base URL check करना होगा।"
+            elif "No AI provider" in error_text:
+                reply = "❌ अभी AI service configure नहीं हुई है। Admin को AI integration enable करनी होगी।"
             else:
-                reply = "❌ अभी जवाब देने में तकनीकी समस्या आ रही है। थोड़ी देर बाद फिर कोशिश करें।"
+                reply = "⚠️ अभी AI जवाब नहीं दे पाया। कृपया थोड़ी देर बाद फिर अपना सवाल भेजें।"
 
-        send_message(chat_id, reply)
+        send_message(chat_id, reply, menu_keyboard())
         return jsonify({"ok": True})
     except Exception:
         logging.exception("Telegram webhook error")
-        return jsonify({"ok": False}), 500
+        return jsonify({"ok": False}), 200
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
