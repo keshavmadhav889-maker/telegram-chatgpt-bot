@@ -270,7 +270,7 @@ def ai_reply(user_text, chat_id):
         models.append("gemini-3.1-flash-lite")
     last_error = None
     for model in models:
-        for delay in [0.0, 0.8, 1.8, 3.5]:
+        for delay in [0.0, 0.5]:
             if delay:
                 time.sleep(delay)
             try:
