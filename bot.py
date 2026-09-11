@@ -103,7 +103,8 @@ Answer in simple Hindi/Hinglish unless English is requested.
 Understand spelling mistakes and short student messages.
 Use conversation history naturally.
 IMPORTANT: For current university information, use only VERIFIED OFFICIAL UNIRAJ SOURCE DATA supplied in the prompt. Never invent dates, marks, notices, syllabus details or results.
-IMPORTANT: Give a complete answer to the student question. Do not intentionally shorten or omit useful syllabus, notice, exam, admission or result information merely to respond faster. When an official PDF or official page is relevant, include its direct official link and summarize the verified relevant data supplied to you.
+IMPORTANT: Give a complete answer to the student question. Do not intentionally shorten or omit useful syllabus, notice, exam, admission or result information merely to respond faster.
+IMPORTANT EXAM RULE: If the student uses /exam and then provides a course + semester such as 'BSc 3rd semester', answer the exam question directly. First extract the exact relevant exam date/schedule/status from VERIFIED OFFICIAL UNIRAJ DATA. Do NOT give a general syllabus/result/admission explanation. Do NOT repeat the menu instructions. If the exact date is not present in verified data, say that clearly and provide only the official exam/notice link. Keep exam answers focused, normally within 6-8 lines, while including every verified date/detail that answers the question. When an official PDF or official page is relevant, include its direct official link and summarize the verified relevant data supplied to you.
 If official source data is unavailable, clearly say that the official site could not be reached and give the official link instead of guessing.
 For personal result questions, give the official result portal and Result Help group; never claim to access private marks.
 For guess-paper questions, mention both free guess-paper channels.
@@ -191,7 +192,7 @@ def fetch_official(url, timeout=6):
 def official_source_for(text):
     q = text.lower()
     syllabus = any(x in q for x in ['syllabus', 'सिलेबस', 'पाठ्यक्रम'])
-    current = any(x in q for x in ['latest', 'today', 'aaj', 'current', 'abhi', 'update', 'notice', 'notification', 'exam date', 'exam dates', 'date', 'timetable', 'time table', 'last date', 'आज', 'अभी', 'अपडेट', 'नोटिस', 'तिथि', 'अंतिम तिथि'])
+    current = any(x in q for x in ['latest', 'today', 'aaj', 'current', 'abhi', 'update', 'notice', 'notification', 'exam date', 'exam dates', 'date', 'timetable', 'exam', 'examination', 'परीक्षा', 'time table', 'last date', 'आज', 'अभी', 'अपडेट', 'नोटिस', 'तिथि', 'अंतिम तिथि'])
     admission = any(x in q for x in ['admission', 'प्रवेश'])
     if syllabus and any(x in q for x in ['math', 'mathematics', 'गणित']):
         return f'VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}'
@@ -265,6 +266,9 @@ def ai_reply(user_text, chat_id):
     if quick:
         return quick
     official_data = official_source_for(user_text)
+    exam_context = any(x in user_text.lower() for x in ['exam', 'परीक्षा', 'exam date', 'exam dates']) or any('exam' in str(msg).lower() for role, msg in USER_HISTORY.get(chat_id, [])[-4:])
+    if exam_context and 'VERIFIED OFFICIAL UNIRAJ NOTICES PAGE' not in official_data and 'OFFICIAL UNIRAJ NOTICES' not in official_data:
+        official_data = official_source_for(user_text + ' exam')
     models = [GEMINI_MODEL]
     if "gemini-3.1-flash-lite" not in models:
         models.append("gemini-3.1-flash-lite")
