@@ -1,0 +1,1 @@
+Every normal student message and bot answer is saved by chat ID. The model receives recent saved turns so follow-up messages like 'haan', 'iska', 'kab', 'aur batao' resolve to the correct subject. /reset deletes the saved conversation for that chat. DATABASE_URL is intended for durable PostgreSQL storage.
