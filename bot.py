@@ -265,24 +265,26 @@ def ai_reply(user_text, chat_id):
     if quick:
         return quick
     official_data = official_source_for(user_text)
-    models = model_candidates()
+    models = [GEMINI_MODEL]
+    if "gemini-3.1-flash-lite" not in models:
+        models.append("gemini-3.1-flash-lite")
     last_error = None
     for model in models:
-        for delay in [0.0, 0.5]:
+        for delay in [0.0, 0.8, 1.8, 3.5]:
             if delay:
                 time.sleep(delay)
             try:
                 answer = request_gemini(user_text, chat_id, model, official_data)
-                logging.info('Gemini success model=%s', model)
+                logging.info("Gemini success model=%s", model)
                 return answer
             except Exception as exc:
                 last_error = exc
-                logging.warning('Gemini request failed model=%s: %s', model, exc)
+                logging.warning("Gemini request failed model=%s: %s", model, exc)
                 if not is_transient(exc):
                     break
-    logging.error('AI unavailable after failover: %s', last_error)
+    logging.error("AI unavailable after failover: %s", last_error)
     notify_admin_ai_failure(user_text, chat_id, last_error, models)
-    return 'अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।'
+    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
 
 # ================= INDIRECT CHANNEL PROMOTION =================
 def maybe_add_promotion(chat_id, reply):
