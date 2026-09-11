@@ -1,0 +1,40 @@
+name: Fix exam direct answers
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch exam answer behavior
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text()
+          old = "IMPORTANT: Give a complete answer to the student question. Do not intentionally shorten or omit useful syllabus, notice, exam, admission or result information merely to respond faster."
+          new = old + "\nIMPORTANT EXAM RULE: If the student uses /exam and then provides a course + semester such as 'BSc 3rd semester', answer the exam question directly. First extract the exact relevant exam date/schedule/status from VERIFIED OFFICIAL UNIRAJ DATA. Do NOT give a general syllabus/result/admission explanation. Do NOT repeat the menu instructions. If the exact date is not present in verified data, say that clearly and provide only the official exam/notice link. Keep exam answers focused, normally within 6-8 lines, while including every verified date/detail that answers the question."
+          if old in s and 'IMPORTANT EXAM RULE:' not in s:
+              s = s.replace(old, new, 1)
+          old_current = "'exam date', 'exam dates', 'date', 'timetable'"
+          new_current = "'exam date', 'exam dates', 'date', 'timetable', 'exam', 'examination', 'परीक्षा'"
+          if old_current in s:
+              s = s.replace(old_current, new_current, 1)
+          marker = "    official_data = official_source_for(user_text)\n"
+          inject = "    exam_context = any(x in user_text.lower() for x in ['exam', 'परीक्षा', 'exam date', 'exam dates']) or any('exam' in str(msg).lower() for role, msg in USER_HISTORY.get(chat_id, [])[-4:])\n    if exam_context and 'VERIFIED OFFICIAL UNIRAJ NOTICES PAGE' not in official_data and 'OFFICIAL UNIRAJ NOTICES' not in official_data:\n        official_data = official_source_for(user_text + ' exam')\n"
+          if marker in s and 'exam_context = any' not in s:
+              s = s.replace(marker, marker + inject, 1)
+          p.write_text(s)
+          PY
+          python -m py_compile bot.py
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bot.py
+          if git diff --cached --quiet; then echo 'No change needed'; else git commit -m 'Fix exam command to answer semester directly'; git push; fi
