@@ -1,0 +1,115 @@
+name: Add official PDF delivery
+on:
+  push:
+    branches: [main]
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch bot with official PDF delivery
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('bot.py')
+          s=p.read_text()
+          if '# OFFICIAL PDF DELIVERY START' not in s:
+              s=s.replace('import sqlite3\n', 'import sqlite3\nimport tempfile\nfrom urllib.parse import urljoin\n')
+              marker='def quick_reply(text):\n'
+              code=r'''# OFFICIAL PDF DELIVERY START
+
+def send_document(chat_id, file_path, caption):
+    with open(file_path, 'rb') as fh:
+        r=requests.post(f'{TELEGRAM_API}/sendDocument', data={'chat_id':chat_id,'caption':caption[:1024]}, files={'document':('official-uniraj.pdf',fh,'application/pdf')}, timeout=35)
+    r.raise_for_status()
+    return r.json()
+
+def find_official_pdf(user_text):
+    q=' '.join(user_text.lower().split())
+    syllabus_words=['syllabus','सिलेबस','पाठ्यक्रम']
+    notice_words=['notice','नोटिस','notification','notification pdf','circular','परिपत्र','सूचना']
+    exam_words=['exam','examination','परीक्षा','timetable','time table','डेटशीट','date sheet','exam date','admit card','admitcard','प्रवेश पत्र']
+    wants_doc=any(x in q for x in ['pdf','पीडीएफ','document','फाइल','file','send','bhejo','भेजो','download','डाउनलोड','चाहिए','भेज'])
+    wants_kind=any(x in q for x in syllabus_words+notice_words+exam_words)
+    if not (wants_doc or wants_kind):
+        return None
+    if any(x in q for x in syllabus_words):
+        if any(x in q for x in ['math','mathematics','गणित']):
+            return BSC_MATHS_2025_26_PDF, '📘 B.Sc. Mathematics official syllabus 2025-26'
+        page_url=UNIRAJ_SYLLABUS
+        page_title='Official Uniraj syllabus'
+    elif any(x in q for x in exam_words):
+        page_url='https://uniraj.ac.in/index.php?exid=3&mid=192'
+        page_title='Official Uniraj examination document'
+    elif any(x in q for x in notice_words):
+        page_url=UNIRAJ_NOTICES
+        page_title='Official Uniraj notice'
+    else:
+        return None
+    try:
+        html=fetch_official(page_url, timeout=8)
+        soup=BeautifulSoup(html,'html.parser')
+        terms=[w for w in q.split() if len(w)>2 and w not in ['send','bhejo','download','pdf','please','chahiye','की','का','के','में','और','है']]
+        candidates=[]
+        for a in soup.find_all('a', href=True):
+            href=urljoin(page_url,a.get('href','').strip())
+            title=' '.join(a.stripped_strings).strip()
+            blob=(title+' '+href).lower()
+            if not href.startswith(('http://','https://')): continue
+            score=(6 if '.pdf' in href.lower() else 0)+sum(2 for t in terms if t in blob)
+            if score>0: candidates.append((score,href,title))
+        candidates.sort(reverse=True,key=lambda x:x[0])
+        if candidates:
+            return candidates[0][1], candidates[0][2] or page_title
+    except Exception as exc:
+        logging.warning('Official PDF search failed: %s',exc)
+    return None
+
+def try_send_official_document(chat_id, user_text):
+    found=find_official_pdf(user_text)
+    if not found: return None
+    url,title=found
+    path=None
+    try:
+        r=requests.get(url,timeout=25,headers={'User-Agent':'UnirajInformationBot/3.0','Accept':'application/pdf,*/*'})
+        r.raise_for_status()
+        content=r.content
+        ctype=(r.headers.get('content-type') or '').lower()
+        if len(content)<1000 or ('pdf' not in ctype and not content.startswith(b'%PDF')):
+            return None
+        if len(content)>49*1024*1024:
+            send_message(chat_id, f'📄 Official PDF मिली, लेकिन Telegram upload limit के कारण file बहुत बड़ी है।\n\n🔗 {url}')
+            return 'official pdf link'
+        with tempfile.NamedTemporaryFile(prefix='uniraj_',suffix='.pdf',delete=False) as tmp:
+            tmp.write(content); path=tmp.name
+        send_document(chat_id,path,f'📄 {title}\n\nSource: University of Rajasthan (Uniraj) official website')
+        return 'official PDF भेज दी गई।'
+    except Exception as exc:
+        logging.warning('Official PDF download/send failed url=%s error=%s',url,exc)
+        return None
+    finally:
+        if path:
+            try: Path(path).unlink(missing_ok=True)
+            except Exception: pass
+# OFFICIAL PDF DELIVERY END
+
+'''
+              code=code.replace('import tempfile', 'import tempfile')
+              s=s.replace(marker, code+marker, 1)
+              old="""        reply=ai_reply(text,chat_id); save_turn(chat_id,text,reply); reply=maybe_add_promotion(chat_id,reply); send_message(chat_id,reply); return jsonify({'ok':True})"""
+              new="""        document_reply=try_send_official_document(chat_id,text)\n        if document_reply:\n            save_turn(chat_id,text,document_reply)\n            return jsonify({'ok':True})\n        reply=ai_reply(text,chat_id); save_turn(chat_id,text,reply); reply=maybe_add_promotion(chat_id,reply); send_message(chat_id,reply); return jsonify({'ok':True})"""
+              if old not in s: raise SystemExit('webhook target not found')
+              s=s.replace(old,new,1)
+              p.write_text(s)
+          PY
+          python -m py_compile bot.py
+      - name: Commit bot changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bot.py
+          if git diff --cached --quiet; then echo 'No bot changes'; else git commit -m 'Send official Uniraj PDFs directly in Telegram'; git push; fi
