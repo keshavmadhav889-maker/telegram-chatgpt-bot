@@ -96,6 +96,7 @@ def send_message(chat_id, text):
     r = requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}, timeout=10)
     r.raise_for_status(); return r.json()
 
+
 # ADMIN_AI_FAILURE_ALERT_V1
 def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
     alert = (
