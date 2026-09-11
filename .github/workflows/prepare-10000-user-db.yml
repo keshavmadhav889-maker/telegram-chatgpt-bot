@@ -1,0 +1,43 @@
+name: Prepare 10000-user database storage
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set persistent-disk-safe SQLite path
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text()
+          old = 'DB_PATH = os.getenv("USER_DB_PATH", "users.db")'
+          new = 'DB_PATH = os.getenv("USER_DB_PATH", "/var/data/users.db")'
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+          elif 'DB_PATH = os.getenv("USER_DB_PATH", "/var/data/users.db")' in s:
+              pass
+          else:
+              raise SystemExit('Expected DB_PATH line not found')
+          PY
+          python -m py_compile bot.py
+
+      - name: Commit storage-path update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py
+          if git diff --cached --quiet; then
+            echo "No change needed"
+          else
+            git commit -m "Prepare persistent user database storage"
+            git push
+          fi
