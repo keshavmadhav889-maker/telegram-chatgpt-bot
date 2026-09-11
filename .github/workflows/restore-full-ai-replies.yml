@@ -1,0 +1,51 @@
+name: Restore full AI answers and official source handling
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore full answers and balanced speed
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text()
+          replacements = {
+              'AI_TIMEOUT = 8': 'AI_TIMEOUT = 15',
+              'CACHE_SECONDS = 90': 'CACHE_SECONDS = 300',
+              'def fetch_official(url, timeout=3):': 'def fetch_official(url, timeout=6):',
+              '"generationConfig":{"maxOutputTokens":700,"temperature":0.2}': '"generationConfig":{"maxOutputTokens":1800,"temperature":0.2}',
+              'for delay in [0.0, 0.8, 1.8, 3.5]:': 'for delay in [0.0, 0.5]:',
+              'return f"OFFICIAL SYLLABUS INDEX: {UNIRAJ_SYLLABUS}\\nB.Sc Maths known official PDF: {BSC_MATHS_2025_26_PDF}"': 'return f"OFFICIAL SYLLABUS INDEX: {UNIRAJ_SYLLABUS}\\nB.Sc Maths known official PDF: {BSC_MATHS_2025_26_PDF}"',
+          }
+          for old, new in replacements.items():
+              if old in s:
+                  s = s.replace(old, new, 1)
+          marker = 'IMPORTANT: For current university information, use only VERIFIED OFFICIAL UNIRAJ SOURCE DATA supplied in the prompt. Never invent dates, marks, notices, syllabus details or results.'
+          addition = 'IMPORTANT: Give a complete answer to the student question. Do not intentionally shorten or omit useful syllabus, notice, exam, admission or result information merely to respond faster. When an official PDF or official page is relevant, include its direct official link and summarize the verified relevant data supplied to you.'
+          if addition not in s and marker in s:
+              s = s.replace(marker, marker + '\\n' + addition, 1)
+          p.write_text(s)
+          PY
+          python -m py_compile bot.py
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py
+          if git diff --cached --quiet; then
+            echo "No changes needed"
+          else
+            git commit -m "Restore complete AI answers"
+            git push
+          fi
