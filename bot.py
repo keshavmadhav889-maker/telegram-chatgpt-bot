@@ -192,7 +192,7 @@ def fetch_official(url, timeout=6):
 def official_source_for(text):
     q = text.lower()
     syllabus = any(x in q for x in ['syllabus', 'सिलेबस', 'पाठ्यक्रम'])
-    current = any(x in q for x in ['latest', 'today', 'aaj', 'current', 'abhi', 'update', 'notice', 'notification', 'exam date', 'exam dates', 'date', 'timetable', 'exam', 'examination', 'परीक्षा', 'time table', 'last date', 'आज', 'अभी', 'अपडेट', 'नोटिस', 'तिथि', 'अंतिम तिथि'])
+    current = any(x in q for x in ['latest', 'today', 'aaj', 'current', 'abhi', 'update', 'notice', 'notification', 'exam date', 'exam dates', 'date', 'timetable', 'exam', 'examination', 'परीक्षा', 'exam', 'examination', 'परीक्षा', 'time table', 'last date', 'आज', 'अभी', 'अपडेट', 'नोटिस', 'तिथि', 'अंतिम तिथि'])
     admission = any(x in q for x in ['admission', 'प्रवेश'])
     if syllabus and any(x in q for x in ['math', 'mathematics', 'गणित']):
         return f'VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}'
