@@ -1,0 +1,1 @@
+Conversation memory is stored in the configured DATABASE_URL database and recent turns are used for follow-up context.
