@@ -13,7 +13,7 @@ BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
 ADMIN_IDS = {8280167872}
-AI_TIMEOUT = 8
+AI_TIMEOUT = 15
 MAX_HISTORY = 12
 USER_HISTORY = {}
 PROMO_EVERY = 5
@@ -80,7 +80,7 @@ SYSTEM_PROMPT = f"""You are Uniraj Information Section, a professional Hindi-fir
 Answer in simple Hindi/Hinglish unless English is requested.
 Understand spelling mistakes and short student messages.
 Use conversation history naturally.
-IMPORTANT: For current university information, use only VERIFIED OFFICIAL UNIRAJ SOURCE DATA supplied in the prompt. Never invent dates, marks, notices, syllabus details or results.
+IMPORTANT: For current university information, use only VERIFIED OFFICIAL UNIRAJ SOURCE DATA supplied in the prompt. Never invent dates, marks, notices, syllabus details or results.\nIMPORTANT: Give a complete answer to the student question. Do not intentionally shorten or omit useful syllabus, notice, exam, admission or result information merely to respond faster. When an official PDF or official page is relevant, include its direct official link and summarize the verified relevant data supplied to you.
 If official source data is unavailable, clearly say that the official site could not be reached and give the official link instead of guessing.
 For personal result questions, give the official result portal and Result Help group; never claim to access private marks.
 For guess-paper questions, mention both free guess-paper channels.
@@ -149,9 +149,9 @@ def quick_reply(text):
     return None
 
 # ================= OFFICIAL UNIRAJ LOOKUP =================
-OFFICIAL_CACHE = {}; CACHE_SECONDS = 90
+OFFICIAL_CACHE = {}; CACHE_SECONDS = 300
 
-def fetch_official(url, timeout=3):
+def fetch_official(url, timeout=6):
     now = time.time(); cached = OFFICIAL_CACHE.get(url)
     if cached and now - cached[0] < CACHE_SECONDS: return cached[1]
     r = requests.get(url, timeout=timeout, headers={"User-Agent": "UnirajInformationBot/2.0"}); r.raise_for_status()
@@ -192,7 +192,7 @@ def make_prompt(user_text, chat_id, official_data=""):
 def request_gemini(user_text, chat_id, model, official_data=""):
     if not GEMINI_API_KEY: raise RuntimeError("Gemini unavailable")
     url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload={"contents":[{"role":"user","parts":[{"text":make_prompt(user_text,chat_id,official_data)}]}],"generationConfig":{"maxOutputTokens":700,"temperature":0.2}}
+    payload={"contents":[{"role":"user","parts":[{"text":make_prompt(user_text,chat_id,official_data)}]}],"generationConfig":{"maxOutputTokens":1800,"temperature":0.2}}
     r=requests.post(url,headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
     if not r.ok: raise RuntimeError(f"Gemini {model} HTTP {r.status_code}: {r.text[:500]}")
     data=r.json(); candidates=data.get("candidates",[]); parts=candidates[0].get("content",{}).get("parts",[]) if candidates else []
@@ -212,7 +212,7 @@ def ai_reply(user_text, chat_id):
         models.append("gemini-3.1-flash-lite")
     last_error = None
     for model in models:
-        for delay in [0.0, 0.8, 1.8, 3.5]:
+        for delay in [0.0, 0.5]:
             if delay:
                 time.sleep(delay)
             try:
