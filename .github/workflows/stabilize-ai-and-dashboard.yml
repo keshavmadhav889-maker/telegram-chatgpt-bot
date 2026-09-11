@@ -11,28 +11,59 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Patch bot
+      - name: Patch bot for fast AI replies
         run: |
           python - <<'PY'
           from pathlib import Path
-          p=Path('bot.py'); s=p.read_text()
-          s=s.replace("AI_TIMEOUT = 15", "AI_TIMEOUT = 25", 1)
-          s=s.replace("return any(f'HTTP {code}' in str(exc) for code in [429, 500, 502, 503, 504])", "return any(f'HTTP {code}' in str(exc) for code in [408, 429, 500, 502, 503, 504]) or 'timed out' in str(exc).lower() or 'timeout' in str(exc).lower()", 1)
-          old='''def ai_reply(user_text, chat_id):\n    quick = quick_reply(user_text)\n    if quick:\n        return quick\n    official_data = official_source_for(user_text)\n    models = [GEMINI_MODEL]\n    if \"gemini-3.1-flash-lite\" not in models:\n        models.append(\"gemini-3.1-flash-lite\")\n    last_error = None\n    for model in models:\n        for delay in [0.0, 0.8, 1.8, 3.5]:\n            if delay:\n                time.sleep(delay)\n            try:\n                answer = request_gemini(user_text, chat_id, model, official_data)\n                logging.info(\"Gemini success model=%s\", model)\n                return answer\n            except Exception as exc:\n                last_error = exc\n                logging.warning(\"Gemini request failed model=%s: %s\", model, exc)\n                if not is_transient(exc):\n                    break\n    logging.error(\"AI unavailable after failover: %s\", last_error)\n    notify_admin_ai_failure(user_text, chat_id, last_error, models)\n    return \"अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।\"\n'''
-          new='''def ai_reply(user_text, chat_id):\n    quick = quick_reply(user_text)\n    if quick:\n        return quick\n    official_data = official_source_for(user_text)\n    models = model_candidates()\n    # Prefer the current fast model; never call a retired model from an old env value.\n    preferred = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.1-flash-lite']\n    models = [m for m in preferred if m in models] + [m for m in models if m not in preferred]\n    last_error = None\n    for model in models:\n        attempts = 2 if model == models[0] else 1\n        for attempt in range(attempts):\n            try:\n                answer = request_gemini(user_text, chat_id, model, official_data)\n                logging.info('Gemini success model=%s attempt=%s', model, attempt + 1)\n                return answer\n            except Exception as exc:\n                last_error = exc\n                logging.warning('Gemini request failed model=%s attempt=%s: %s', model, attempt + 1, exc)\n                if not is_transient(exc) or attempt + 1 >= attempts:\n                    break\n                time.sleep(0.8)\n    logging.error('AI unavailable after failover: %s', last_error)\n    notify_admin_ai_failure(user_text, chat_id, last_error, models)\n    return 'अभी AI service से जवाब नहीं मिल पा रहा है। कृपया थोड़ी देर बाद फिर कोशिश करें।'\n'''
-          if old not in s: raise SystemExit('ai_reply block not found')
-          s=s.replace(old,new,1)
-          s=s.replace("return 'This bot is made and powered by KESHAV MADHAV.'", "return 'यह Uniraj Information Section bot है।'", 1)
-          old_dash='''def send_user_dashboard(chat_id, page=1):\n    total = total_user_count()\n    active = user_count()\n    per_page = 25\n    total_pages = max(1, (total + per_page - 1) // per_page)\n    page = min(max(1, page), total_pages)\n    rows = user_directory(page, per_page)\n'''
-          new_dash='''def send_user_dashboard(chat_id, page=1):\n    try:\n        total = total_user_count()\n        active = user_count()\n        per_page = 25\n        total_pages = max(1, (total + per_page - 1) // per_page)\n        page = min(max(1, page), total_pages)\n        rows = user_directory(page, per_page)\n    except Exception as exc:\n        logging.exception('User dashboard failed')\n        send_message(chat_id, '📊 ADMIN USER DASHBOARD\\n\\nDatabase अभी उपलब्ध नहीं है। Bot के database connection को check किया जा रहा है।')\n        return\n'''
-          if old_dash not in s: raise SystemExit('dashboard block not found')
-          s=s.replace(old_dash,new_dash,1)
+          import re
+          p = Path('bot.py')
+          s = p.read_text()
+          s = re.sub(r"AI_TIMEOUT\s*=\s*\d+", "AI_TIMEOUT = 18", s, count=1)
+          start = s.find('def model_candidates():')
+          end = s.find('\ndef ai_reply(', start)
+          if start != -1 and end != -1:
+              s = s[:start] + "def model_candidates():\n    # Ignore stale Render env model values and use only current stable models.\n    return ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.1-flash-lite']\n" + s[end:]
+          start = s.find('def ai_reply(')
+          if start == -1:
+              raise SystemExit('ai_reply not found')
+          end = s.find('\ndef ', start + 5)
+          if end == -1:
+              end = len(s)
+          new_func = '''def ai_reply(user_text, chat_id):
+    quick = quick_reply(user_text)
+    if quick:
+        return quick
+    official_data = official_source_for(user_text)
+    models = model_candidates()
+    last_error = None
+    tried_models = []
+    for index, model in enumerate(models):
+        tried_models.append(model)
+        attempts = 2 if index == 0 else 1
+        for attempt in range(attempts):
+            try:
+                answer = request_gemini(user_text, chat_id, model, official_data)
+                logging.info('Gemini success model=%s attempt=%s', model, attempt + 1)
+                return answer
+            except Exception as exc:
+                last_error = exc
+                logging.warning('Gemini request failed model=%s attempt=%s: %s', model, attempt + 1, exc)
+                if not is_transient(exc) or attempt + 1 >= attempts:
+                    break
+                time.sleep(0.6)
+    logging.error('AI unavailable after failover: %s', last_error)
+    notify_admin_ai_failure(user_text, chat_id, last_error, tried_models)
+    return 'अभी AI service से जवाब नहीं मिल पा रहा है। कृपया थोड़ी देर बाद फिर कोशिश करें।'
+'''
+          s = s[:start] + new_func + s[end:]
+          s = s.replace("'temperature': 0.2", "'temperature': 1.0", 1)
+          s = s.replace("return 'This bot is made and powered by KESHAV MADHAV.'", "return 'यह Uniraj Information Section bot है।'", 1)
           p.write_text(s)
           PY
           python -m py_compile bot.py
-      - name: Commit
+      - name: Commit patched bot
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bot.py
-          if git diff --cached --quiet; then echo 'No change needed'; else git commit -m 'Stabilize Gemini failover and dashboard'; git push; fi
+          if git diff --cached --quiet; then echo 'No change needed'; else git commit -m 'Speed up Gemini replies and harden failover'; git push; fi
