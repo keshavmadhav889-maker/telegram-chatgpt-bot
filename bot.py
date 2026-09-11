@@ -13,7 +13,7 @@ BOT_TOKEN = (os.getenv('TELEGRAM_BOT_TOKEN') or '').strip()
 GEMINI_API_KEY = (os.getenv('GEMINI_API_KEY') or '').strip()
 GEMINI_MODEL = (os.getenv('GEMINI_MODEL') or 'gemini-3.5-flash-lite').strip()
 ADMIN_IDS = {8280167872}
-AI_TIMEOUT = 15
+AI_TIMEOUT = 25
 MAX_HISTORY = 12
 USER_HISTORY = {}
 PROMO_EVERY = 5
@@ -163,7 +163,7 @@ def quick_reply(text):
     if any(x in q for x in ['guess paper', 'guesspaper', 'guess papers', 'गेस पेपर']):
         return f'📚 Free Uniraj Guess Papers\n\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}'
     if any(x in q for x in ['kisne banaya', 'किसने बनाया', 'who made', 'developer', 'owner']):
-        return 'This bot is made and powered by KESHAV MADHAV.'
+        return 'यह Uniraj Information Section bot है।'
     if any(x in q for x in ['result', 'रिजल्ट', 'परिणाम']):
         return f'🏆 Uniraj Official Result\n\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}'
     if any(x in q for x in ['admission', 'प्रवेश']):
@@ -248,7 +248,7 @@ def request_gemini(user_text, chat_id, model, official_data=''):
     return answer
 
 def is_transient(exc):
-    return any(f'HTTP {code}' in str(exc) for code in [429, 500, 502, 503, 504])
+    return any(f'HTTP {code}' in str(exc) for code in [408, 429, 500, 502, 503, 504]) or 'timed out' in str(exc).lower() or 'timeout' in str(exc).lower()
 
 def model_candidates():
     candidates = []
@@ -265,26 +265,27 @@ def ai_reply(user_text, chat_id):
     if quick:
         return quick
     official_data = official_source_for(user_text)
-    models = [GEMINI_MODEL]
-    if "gemini-3.1-flash-lite" not in models:
-        models.append("gemini-3.1-flash-lite")
+    models = model_candidates()
+    # Prefer the current fast model; never call a retired model from an old env value.
+    preferred = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.1-flash-lite']
+    models = [m for m in preferred if m in models] + [m for m in models if m not in preferred]
     last_error = None
     for model in models:
-        for delay in [0.0, 0.8, 1.8, 3.5]:
-            if delay:
-                time.sleep(delay)
+        attempts = 2 if model == models[0] else 1
+        for attempt in range(attempts):
             try:
                 answer = request_gemini(user_text, chat_id, model, official_data)
-                logging.info("Gemini success model=%s", model)
+                logging.info('Gemini success model=%s attempt=%s', model, attempt + 1)
                 return answer
             except Exception as exc:
                 last_error = exc
-                logging.warning("Gemini request failed model=%s: %s", model, exc)
-                if not is_transient(exc):
+                logging.warning('Gemini request failed model=%s attempt=%s: %s', model, attempt + 1, exc)
+                if not is_transient(exc) or attempt + 1 >= attempts:
                     break
-    logging.error("AI unavailable after failover: %s", last_error)
+                time.sleep(0.8)
+    logging.error('AI unavailable after failover: %s', last_error)
     notify_admin_ai_failure(user_text, chat_id, last_error, models)
-    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
+    return 'अभी AI service से जवाब नहीं मिल पा रहा है। कृपया थोड़ी देर बाद फिर कोशिश करें।'
 
 # ================= INDIRECT CHANNEL PROMOTION =================
 def maybe_add_promotion(chat_id, reply):
@@ -303,12 +304,17 @@ def format_time(ts):
         return '-'
 
 def send_user_dashboard(chat_id, page=1):
-    total = total_user_count()
-    active = user_count()
-    per_page = 25
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = min(max(1, page), total_pages)
-    rows = user_directory(page, per_page)
+    try:
+        total = total_user_count()
+        active = user_count()
+        per_page = 25
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = min(max(1, page), total_pages)
+        rows = user_directory(page, per_page)
+    except Exception as exc:
+        logging.exception('User dashboard failed')
+        send_message(chat_id, '📊 ADMIN USER DASHBOARD\n\nDatabase अभी उपलब्ध नहीं है। Bot के database connection को check किया जा रहा है।')
+        return
     lines = ['📊 ADMIN USER DASHBOARD', '', f'👥 Total students started: {total}', f'🟢 Currently active records: {active}', f'📄 Page: {page}/{total_pages}', '', '👤 Recent students:']
     if not rows:
         lines.append('अभी कोई student record नहीं है।')
