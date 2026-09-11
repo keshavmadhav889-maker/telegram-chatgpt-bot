@@ -52,8 +52,7 @@ def db_connect():
 
 def register_user(user,chat_id):
     try:
-        now=time.time(); conn=db_connect()
-        conn.execute('INSERT INTO users(chat_id,username,first_name,active,created_at,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,active=1,last_seen=excluded.last_seen',(chat_id,user.get('username',''),user.get('first_name',''),1,now,now)); conn.commit(); conn.close()
+        now=time.time(); conn=db_connect(); conn.execute('INSERT INTO users(chat_id,username,first_name,active,created_at,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,active=1,last_seen=excluded.last_seen',(chat_id,user.get('username',''),user.get('first_name',''),1,now,now)); conn.commit(); conn.close()
     except Exception: logging.exception('User registration failed')
 
 def save_message(chat_id,role,message):
@@ -180,7 +179,8 @@ def official_source_for(text):
     return ''
 
 def make_prompt(user_text,chat_id,official_data=''):
-    parts=[f'SYSTEM: {SYSTEM_PROMPT}']; history=load_history(chat_id,MAX_HISTORY)
+    parts=[f'SYSTEM: {SYSTEM_PROMPT}']
+    history=load_history(chat_id,MAX_HISTORY)
     if history: parts.append('SAVED CONVERSATION HISTORY:\n'+'\n'.join(f'{r.upper()}: {m}' for r,m in history))
     if official_data: parts.append('VERIFIED OFFICIAL UNIRAJ DATA:\n'+official_data)
     parts.append(f'LATEST STUDENT MESSAGE: {user_text}')
@@ -204,13 +204,11 @@ def model_candidates(): return ['gemini-3.5-flash-lite','gemini-3.6-flash','gemi
 def ai_reply(user_text,chat_id):
     quick=quick_reply(user_text)
     if quick: return quick
-    official_data=official_source_for(user_text)
-    models=model_candidates(); last_error=None; tried=[]
+    official_data=official_source_for(user_text); models=model_candidates(); last_error=None; tried=[]
     for index,model in enumerate(models):
         tried.append(model); attempts=2 if index==0 else 1
         for attempt in range(attempts):
-            try:
-                return request_gemini(user_text,chat_id,model,official_data)
+            try: return request_gemini(user_text,chat_id,model,official_data)
             except Exception as exc:
                 last_error=exc
                 if not is_transient(exc) or attempt+1>=attempts: break
