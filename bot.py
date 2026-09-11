@@ -17,7 +17,7 @@ AI_TIMEOUT = 18
 MAX_HISTORY = 12
 USER_HISTORY = {}
 PROMO_EVERY = 5
-DB_PATH = os.getenv("USER_DB_PATH", "users.db")
+DB_PATH = os.getenv("USER_DB_PATH", "/var/data/users.db")
 
 if not BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN missing hai")
