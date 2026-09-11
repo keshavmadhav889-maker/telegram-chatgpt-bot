@@ -96,6 +96,7 @@ def send_message(chat_id, text):
     r = requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}, timeout=8)
     r.raise_for_status(); return r.json()
 
+
 # ADMIN_AI_FAILURE_ALERT_V1
 def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
     alert = (
@@ -211,7 +212,7 @@ def ai_reply(user_text, chat_id):
         models.append("gemini-3.1-flash-lite")
     last_error = None
     for model in models:
-        for delay in [0.0, 0.5]:
+        for delay in [0.0, 0.8, 1.8, 3.5]:
             if delay:
                 time.sleep(delay)
             try:
@@ -225,7 +226,7 @@ def ai_reply(user_text, chat_id):
                     break
     logging.error("AI unavailable after failover: %s", last_error)
     notify_admin_ai_failure(user_text, chat_id, last_error, models)
-    return "अभी AI service व्यस्त है। कृपया 10–15 सेकंड बाद फिर सवाल भेजें।"
+    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
 
 # ================= INDIRECT CHANNEL PROMOTION =================
 def maybe_add_promotion(chat_id, reply):
