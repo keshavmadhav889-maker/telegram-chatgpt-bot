@@ -13,7 +13,7 @@ BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
 ADMIN_IDS = {8280167872}
-AI_TIMEOUT = 18
+AI_TIMEOUT = 8
 MAX_HISTORY = 12
 USER_HISTORY = {}
 PROMO_EVERY = 5
@@ -93,11 +93,8 @@ ADMIN_MENU_COMMANDS = MENU_COMMANDS + [("broadcast", "📢 Send message to all u
 BROADCAST_WAITING = set()
 
 def send_message(chat_id, text):
-    r = requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}, timeout=10)
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": False}, timeout=8)
     r.raise_for_status(); return r.json()
-
-
-
 
 # ADMIN_AI_FAILURE_ALERT_V1
 def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
@@ -194,7 +191,7 @@ def make_prompt(user_text, chat_id, official_data=""):
 def request_gemini(user_text, chat_id, model, official_data=""):
     if not GEMINI_API_KEY: raise RuntimeError("Gemini unavailable")
     url=f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload={"contents":[{"role":"user","parts":[{"text":make_prompt(user_text,chat_id,official_data)}]}],"generationConfig":{"maxOutputTokens":900,"temperature":0.2}}
+    payload={"contents":[{"role":"user","parts":[{"text":make_prompt(user_text,chat_id,official_data)}]}],"generationConfig":{"maxOutputTokens":700,"temperature":0.2}}
     r=requests.post(url,headers={"x-goog-api-key":GEMINI_API_KEY,"Content-Type":"application/json"},json=payload,timeout=AI_TIMEOUT)
     if not r.ok: raise RuntimeError(f"Gemini {model} HTTP {r.status_code}: {r.text[:500]}")
     data=r.json(); candidates=data.get("candidates",[]); parts=candidates[0].get("content",{}).get("parts",[]) if candidates else []
@@ -214,7 +211,7 @@ def ai_reply(user_text, chat_id):
         models.append("gemini-3.1-flash-lite")
     last_error = None
     for model in models:
-        for delay in [0.0, 0.8, 1.8, 3.5]:
+        for delay in [0.0, 0.5]:
             if delay:
                 time.sleep(delay)
             try:
@@ -228,7 +225,7 @@ def ai_reply(user_text, chat_id):
                     break
     logging.error("AI unavailable after failover: %s", last_error)
     notify_admin_ai_failure(user_text, chat_id, last_error, models)
-    return "अभी जवाब तैयार करने में थोड़ी तकनीकी देरी हो रही है। कृपया कुछ सेकंड बाद अपना सवाल फिर भेजें।"
+    return "अभी AI service व्यस्त है। कृपया 10–15 सेकंड बाद फिर सवाल भेजें।"
 
 # ================= INDIRECT CHANNEL PROMOTION =================
 def maybe_add_promotion(chat_id, reply):
@@ -253,15 +250,7 @@ def send_user_dashboard(chat_id, page=1):
     page = min(max(1, page), total_pages)
     if page != 1 or not rows:
         rows = user_directory(page, per_page)
-    lines = [
-        "📊 ADMIN USER DASHBOARD",
-        "",
-        f"👥 Total students started: {total}",
-        f"🟢 Currently active: {active}",
-        f"📄 Page: {page}/{total_pages}",
-        "",
-        "👤 Recent students:"
-    ]
+    lines = ["📊 ADMIN USER DASHBOARD", "", f"👥 Total students started: {total}", f"🟢 Currently active: {active}", f"📄 Page: {page}/{total_pages}", "", "👤 Recent students:"]
     if not rows:
         lines.append("अभी कोई student record नहीं है।")
     else:
@@ -271,10 +260,8 @@ def send_user_dashboard(chat_id, page=1):
             username_text = f"@{username}" if username else "username नहीं है"
             status = "🟢" if active_flag else "⚪"
             lines.append(f"{i}. {status} {display_name} — {username_text}\n   ID: {chat_id_value} | Last: {format_time(last_seen)}")
-    if page < total_pages:
-        lines.append(f"\n➡️ अगला page देखने के लिए /users {page + 1}")
-    if page > 1:
-        lines.append(f"⬅️ पिछला page: /users {page - 1}")
+    if page < total_pages: lines.append(f"\n➡️ अगला page देखने के लिए /users {page + 1}")
+    if page > 1: lines.append(f"⬅️ पिछला page: /users {page - 1}")
     send_message(chat_id, "\n".join(lines))
 
 # ================= WEBHOOK =================
@@ -298,7 +285,7 @@ def command_reply(command, chat_id):
 # ================= ROUTES =================
 @app.get("/")
 def health():
-    return jsonify({"ok":True,"service":"Uniraj Information Section","status":"running","ai":"Gemini","model":GEMINI_MODEL,"telegram_menu":True,"official_uniraj_lookup":True,"admin_user_dashboard":True,"build":"2026-09-11-user-dashboard-v1"})
+    return jsonify({"ok":True,"service":"Uniraj Information Section","status":"running","ai":"Gemini","model":GEMINI_MODEL,"telegram_menu":True,"official_uniraj_lookup":True,"admin_user_dashboard":True,"build":"2026-09-11-speed-fix-v1"})
 
 @app.post("/telegram/webhook")
 def telegram_webhook():
@@ -320,8 +307,7 @@ def telegram_webhook():
             BROADCAST_WAITING.add(chat_id); send_message(chat_id,f"📢 Broadcast mode ON\n\nयह message सभी active users को भेजा जाएगा।\n👥 Current users: {user_count()}\n\nअब अपना message भेजें।\nCancel के लिए /cancel भेजें।"); return jsonify({"ok":True})
         if text.startswith("/users"):
             if chat_id in ADMIN_IDS:
-                parts=text.split()
-                page=1
+                parts=text.split(); page=1
                 if len(parts)>1:
                     try: page=max(1,int(parts[1]))
                     except ValueError: page=1
