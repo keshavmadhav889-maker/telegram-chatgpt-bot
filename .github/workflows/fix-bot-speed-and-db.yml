@@ -1,0 +1,97 @@
+name: Fix bot speed and persistent database
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch bot
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('bot.py')
+          s = p.read_text()
+          s = s.replace('AI_TIMEOUT = 18', 'AI_TIMEOUT = 8', 1)
+          s = s.replace('for delay in [0.0, 0.8, 1.8, 3.5]:', 'for delay in [0.0, 0.6]:', 1)
+          old = 'DB_PATH = os.getenv("USER_DB_PATH", "/var/data/users.db")'
+          if old in s and 'DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()' not in s:
+              start = s.index('# ================= USER DATABASE =================')
+              end = s.index('# ================= UNIRAJ SOURCES =================')
+              new_block = r'''# ================= USER DATABASE =================
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+DB_PATH = os.getenv("USER_DB_PATH", "/var/data/users.db")
+
+if DATABASE_URL:
+    import psycopg2
+
+
+def db_connect():
+    if DATABASE_URL:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=8, sslmode="require")
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS users (chat_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, active INTEGER DEFAULT 1, created_at DOUBLE PRECISION, last_seen DOUBLE PRECISION)")
+        conn.commit(); cur.close()
+        return conn
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, active INTEGER DEFAULT 1, created_at REAL, last_seen REAL)")
+    conn.commit()
+    return conn
+
+
+def db_execute(conn, sql, params=(), fetch=None):
+    if DATABASE_URL:
+        cur = conn.cursor(); cur.execute(sql.replace("?", "%s"), params)
+        result = cur.fetchone() if fetch == "one" else cur.fetchall() if fetch == "all" else None
+        cur.close(); return result
+    cur = conn.execute(sql, params)
+    return cur.fetchone() if fetch == "one" else cur.fetchall() if fetch == "all" else None
+
+
+def register_user(user, chat_id):
+    now = time.time()
+    try:
+        conn = db_connect(); db_execute(conn, "INSERT INTO users(chat_id, username, first_name, active, created_at, last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name, active=1, last_seen=excluded.last_seen", (chat_id, user.get("username", ""), user.get("first_name", ""), 1, now, now)); conn.commit(); conn.close()
+    except Exception: logging.exception("User registration failed")
+
+
+def get_active_users():
+    conn = db_connect(); rows = db_execute(conn, "SELECT chat_id FROM users WHERE active=1", fetch="all"); conn.close(); return [r[0] for r in rows]
+
+
+def mark_user_inactive(chat_id):
+    try:
+        conn = db_connect(); db_execute(conn, "UPDATE users SET active=0 WHERE chat_id=?", (chat_id,)); conn.commit(); conn.close()
+    except Exception: logging.exception("Could not deactivate user")
+
+
+def user_count():
+    conn = db_connect(); total = db_execute(conn, "SELECT COUNT(*) FROM users WHERE active=1", fetch="one")[0]; conn.close(); return total
+
+
+def total_user_count():
+    conn = db_connect(); total = db_execute(conn, "SELECT COUNT(*) FROM users", fetch="one")[0]; conn.close(); return total
+
+
+def user_directory(page=1, per_page=25):
+    page = max(1, int(page)); offset = (page - 1) * per_page
+    conn = db_connect(); rows = db_execute(conn, "SELECT chat_id, username, first_name, active, created_at, last_seen FROM users ORDER BY last_seen DESC LIMIT ? OFFSET ?", (per_page, offset), fetch="all"); conn.close(); return rows
+
+'''
+              s = s[:start] + new_block + s[end:]
+          p.write_text(s)
+          PY
+          python -m py_compile bot.py
+
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py requirements.txt
+          if git diff --cached --quiet; then echo "No changes needed"; else git commit -m "Fix bot response speed and persistent database"; git push; fi
