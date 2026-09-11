@@ -54,6 +54,17 @@ def mark_user_inactive(chat_id):
 def user_count():
     conn = db_connect(); total = conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0]; conn.close(); return total
 
+def total_user_count():
+    conn = db_connect(); total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]; conn.close(); return total
+
+def user_directory(page=1, per_page=25):
+    page = max(1, int(page))
+    offset = (page - 1) * per_page
+    conn = db_connect()
+    rows = conn.execute("SELECT chat_id, username, first_name, active, created_at, last_seen FROM users ORDER BY last_seen DESC LIMIT ? OFFSET ?", (per_page, offset)).fetchall()
+    conn.close()
+    return rows
+
 # ================= UNIRAJ SOURCES =================
 UNIRAJ_HOME = "https://www.uniraj.ac.in/"
 UNIRAJ_SYLLABUS = "https://uniraj.ac.in/index.php?mid=3125"
@@ -78,7 +89,7 @@ Verified sources: University {UNIRAJ_HOME}; Syllabus {UNIRAJ_SYLLABUS}; B.Sc Mat
 
 # ================= TELEGRAM UI =================
 MENU_COMMANDS = [("updates", "📢 Uniraj latest updates"), ("exam", "📝 Exam information"), ("result", "🏆 Result portal/help"), ("admission", "🎓 Admission information"), ("syllabus", "📘 Official syllabus"), ("guess", "📚 Free guess papers"), ("ask", "🤖 Ask Uniraj AI"), ("help", "ℹ️ Help"), ("reset", "♻️ Reset chat memory")]
-ADMIN_MENU_COMMANDS = MENU_COMMANDS + [("broadcast", "📢 Send message to all users"), ("users", "👥 Active user count")]
+ADMIN_MENU_COMMANDS = MENU_COMMANDS + [("broadcast", "📢 Send message to all users"), ("users", "👥 User dashboard")]
 BROADCAST_WAITING = set()
 
 def send_message(chat_id, text):
@@ -222,6 +233,47 @@ def maybe_add_promotion(chat_id, reply):
     if count>0 and count%PROMO_EVERY==0: return reply+f"\n\n📚 Free Study Material: {GUESS_1}\n📖 Guess Papers: {GUESS_2}"
     return reply
 
+# ================= ADMIN USER DASHBOARD =================
+def format_time(ts):
+    if not ts: return "-"
+    try:
+        return time.strftime("%d-%m-%Y %H:%M", time.localtime(ts))
+    except Exception:
+        return "-"
+
+def send_user_dashboard(chat_id, page=1):
+    total = total_user_count()
+    active = user_count()
+    per_page = 25
+    rows = user_directory(page, per_page)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(max(1, page), total_pages)
+    if page != 1 or not rows:
+        rows = user_directory(page, per_page)
+    lines = [
+        "📊 ADMIN USER DASHBOARD",
+        "",
+        f"👥 Total students started: {total}",
+        f"🟢 Currently active: {active}",
+        f"📄 Page: {page}/{total_pages}",
+        "",
+        "👤 Recent students:"
+    ]
+    if not rows:
+        lines.append("अभी कोई student record नहीं है।")
+    else:
+        start_no = (page - 1) * per_page + 1
+        for i, (chat_id_value, username, first_name, active_flag, created_at, last_seen) in enumerate(rows, start_no):
+            display_name = first_name or "No name"
+            username_text = f"@{username}" if username else "username नहीं है"
+            status = "🟢" if active_flag else "⚪"
+            lines.append(f"{i}. {status} {display_name} — {username_text}\n   ID: {chat_id_value} | Last: {format_time(last_seen)}")
+    if page < total_pages:
+        lines.append(f"\n➡️ अगला page देखने के लिए /users {page + 1}")
+    if page > 1:
+        lines.append(f"⬅️ पिछला page: /users {page - 1}")
+    send_message(chat_id, "\n".join(lines))
+
 # ================= WEBHOOK =================
 def configure_webhook():
     render_url=os.getenv("RENDER_EXTERNAL_URL")
@@ -243,7 +295,7 @@ def command_reply(command, chat_id):
 # ================= ROUTES =================
 @app.get("/")
 def health():
-    return jsonify({"ok":True,"service":"Uniraj Information Section","status":"running","ai":"Gemini","model":GEMINI_MODEL,"telegram_menu":True,"official_uniraj_lookup":True,"build":"2026-09-10-ai-reliable-v3"})
+    return jsonify({"ok":True,"service":"Uniraj Information Section","status":"running","ai":"Gemini","model":GEMINI_MODEL,"telegram_menu":True,"official_uniraj_lookup":True,"admin_user_dashboard":True,"build":"2026-09-11-user-dashboard-v1"})
 
 @app.post("/telegram/webhook")
 def telegram_webhook():
@@ -264,7 +316,13 @@ def telegram_webhook():
             if chat_id not in ADMIN_IDS: return jsonify({"ok":True})
             BROADCAST_WAITING.add(chat_id); send_message(chat_id,f"📢 Broadcast mode ON\n\nयह message सभी active users को भेजा जाएगा।\n👥 Current users: {user_count()}\n\nअब अपना message भेजें।\nCancel के लिए /cancel भेजें।"); return jsonify({"ok":True})
         if text.startswith("/users"):
-            if chat_id in ADMIN_IDS: send_message(chat_id,f"👥 Active bot users: {user_count()}")
+            if chat_id in ADMIN_IDS:
+                parts=text.split()
+                page=1
+                if len(parts)>1:
+                    try: page=max(1,int(parts[1]))
+                    except ValueError: page=1
+                send_user_dashboard(chat_id,page)
             return jsonify({"ok":True})
         if chat_id in ADMIN_IDS and chat_id in BROADCAST_WAITING:
             BROADCAST_WAITING.discard(chat_id); sent,failed,total=broadcast_message(text); send_message(chat_id,f"📢 Broadcast complete\n\n👥 Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}"); return jsonify({"ok":True})
