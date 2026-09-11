@@ -2,6 +2,9 @@ import os
 import time
 import logging
 import sqlite3
+import tempfile
+from pathlib import Path
+from urllib.parse import urljoin
 import requests
 import psycopg2
 from flask import Flask, request, jsonify
@@ -121,6 +124,11 @@ BROADCAST_WAITING=set()
 def send_message(chat_id,text):
     r=requests.post(f'{TELEGRAM_API}/sendMessage',json={'chat_id':chat_id,'text':str(text)[:4096],'disable_web_page_preview':False},timeout=8); r.raise_for_status(); return r.json()
 
+def send_document(chat_id,file_path,caption):
+    with open(file_path,'rb') as fh:
+        r=requests.post(f'{TELEGRAM_API}/sendDocument',data={'chat_id':chat_id,'caption':caption[:1024]},files={'document':('official-uniraj.pdf',fh,'application/pdf')},timeout=35)
+    r.raise_for_status(); return r.json()
+
 def notify_admin_ai_failure(user_text,chat_id,last_error,tried_models):
     alert='🚨 Gemini AI Failure\n\n'+f'👤 Chat ID: {chat_id}\n❓ Student question:\n{user_text[:2500]}\n\n🤖 Models tried: {", ".join(tried_models)}\n⚠️ Error: {str(last_error)[:1200]}'
     for admin_id in ADMIN_IDS:
@@ -143,6 +151,63 @@ def broadcast_message(text):
             if 'blocked' in s or 'chat not found' in s or 'forbidden' in s: mark_user_inactive(chat_id)
     return sent,failed,len(users)
 
+OFFICIAL_CACHE={}; CACHE_SECONDS=300
+
+def fetch_official(url,timeout=6):
+    now=time.time(); cached=OFFICIAL_CACHE.get(url)
+    if cached and now-cached[0]<CACHE_SECONDS: return cached[1]
+    r=requests.get(url,timeout=timeout,headers={'User-Agent':'UnirajInformationBot/3.0'}); r.raise_for_status(); OFFICIAL_CACHE[url]=(now,r.text); return r.text
+
+def find_official_pdf(user_text):
+    q=' '.join(user_text.lower().split())
+    syllabus_words=['syllabus','सिलेबस','पाठ्यक्रम']
+    notice_words=['notice','नोटिस','notification','circular','परिपत्र','सूचना']
+    exam_words=['exam','examination','परीक्षा','timetable','time table','डेटशीट','date sheet','exam date','admit card','admitcard','प्रवेश पत्र']
+    wants_doc=any(x in q for x in ['pdf','पीडीएफ','document','फाइल','file','send','bhejo','भेजो','download','डाउनलोड','चाहिए','भेज'])
+    wants_kind=any(x in q for x in syllabus_words+notice_words+exam_words)
+    if not (wants_doc or wants_kind): return None
+    if any(x in q for x in syllabus_words):
+        if any(x in q for x in ['math','mathematics','गणित']): return BSC_MATHS_2025_26_PDF,'📘 B.Sc. Mathematics official syllabus 2025-26'
+        page_url=UNIRAJ_SYLLABUS; page_title='Official Uniraj syllabus'
+    elif any(x in q for x in exam_words):
+        page_url='https://uniraj.ac.in/index.php?exid=3&mid=192'; page_title='Official Uniraj examination document'
+    elif any(x in q for x in notice_words):
+        page_url=UNIRAJ_NOTICES; page_title='Official Uniraj notice'
+    else: return None
+    try:
+        html=fetch_official(page_url,timeout=8); soup=BeautifulSoup(html,'html.parser')
+        terms=[w for w in q.split() if len(w)>2 and w not in ['send','bhejo','download','pdf','please','chahiye','की','का','के','में','और','है']]
+        candidates=[]
+        for a in soup.find_all('a',href=True):
+            href=urljoin(page_url,a.get('href','').strip()); title=' '.join(a.stripped_strings).strip(); blob=(title+' '+href).lower()
+            if not href.startswith(('http://','https://')): continue
+            score=(6 if '.pdf' in href.lower() else 0)+sum(2 for t in terms if t in blob)
+            if score>0: candidates.append((score,href,title))
+        candidates.sort(reverse=True,key=lambda x:x[0])
+        if candidates: return candidates[0][1],candidates[0][2] or page_title
+    except Exception as exc: logging.warning('Official PDF search failed: %s',exc)
+    return None
+
+def try_send_official_document(chat_id,user_text):
+    found=find_official_pdf(user_text)
+    if not found: return None
+    url,title=found; path=None
+    try:
+        r=requests.get(url,timeout=25,headers={'User-Agent':'UnirajInformationBot/3.0','Accept':'application/pdf,*/*'}); r.raise_for_status(); content=r.content; ctype=(r.headers.get('content-type') or '').lower()
+        if len(content)<1000 or ('pdf' not in ctype and not content.startswith(b'%PDF')): return None
+        if len(content)>49*1024*1024:
+            send_message(chat_id,f'📄 Official PDF मिली, लेकिन Telegram upload limit के कारण file बहुत बड़ी है।\n\n🔗 {url}'); return 'official pdf link'
+        with tempfile.NamedTemporaryFile(prefix='uniraj_',suffix='.pdf',delete=False) as tmp:
+            tmp.write(content); path=tmp.name
+        send_document(chat_id,path,f'📄 {title}\n\nSource: University of Rajasthan (Uniraj) official website')
+        return 'Official PDF भेज दी गई।'
+    except Exception as exc:
+        logging.warning('Official PDF download/send failed url=%s error=%s',url,exc); return None
+    finally:
+        if path:
+            try: Path(path).unlink(missing_ok=True)
+            except Exception: pass
+
 def quick_reply(text):
     q=' '.join(text.lower().split())
     if q in {'guess','guess paper','guess papers','guesspaper','गेस पेपर','गेस पेपर्स'}: return f'📚 Free Uniraj Guess Papers\n\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}'
@@ -151,12 +216,6 @@ def quick_reply(text):
     if q in {'syllabus','सिलेबस','पाठ्यक्रम'}: return f'📘 Official Uniraj Syllabus Index:\n{UNIRAJ_SYLLABUS}'
     if q in {'who made this bot','who made bot','kisne banaya','किसने बनाया'}: return 'यह Uniraj Information Section bot है।'
     return None
-OFFICIAL_CACHE={}; CACHE_SECONDS=300
-
-def fetch_official(url,timeout=6):
-    now=time.time(); cached=OFFICIAL_CACHE.get(url)
-    if cached and now-cached[0]<CACHE_SECONDS: return cached[1]
-    r=requests.get(url,timeout=timeout,headers={'User-Agent':'UnirajInformationBot/3.0'}); r.raise_for_status(); OFFICIAL_CACHE[url]=(now,r.text); return r.text
 
 def official_source_for(text):
     q=text.lower(); syllabus=any(x in q for x in ['syllabus','सिलेबस','पाठ्यक्रम']); current=any(x in q for x in ['latest','today','aaj','current','abhi','update','notice','notification','exam date','exam dates','date','timetable','time table','last date','exam','examination','परीक्षा','आज','अभी','अपडेट','नोटिस','तिथि','अंतिम तिथि']); admission=any(x in q for x in ['admission','प्रवेश'])
@@ -179,12 +238,10 @@ def official_source_for(text):
     return ''
 
 def make_prompt(user_text,chat_id,official_data=''):
-    parts=[f'SYSTEM: {SYSTEM_PROMPT}']
-    history=load_history(chat_id,MAX_HISTORY)
+    parts=[f'SYSTEM: {SYSTEM_PROMPT}']; history=load_history(chat_id,MAX_HISTORY)
     if history: parts.append('SAVED CONVERSATION HISTORY:\n'+'\n'.join(f'{r.upper()}: {m}' for r,m in history))
     if official_data: parts.append('VERIFIED OFFICIAL UNIRAJ DATA:\n'+official_data)
-    parts.append(f'LATEST STUDENT MESSAGE: {user_text}')
-    parts.append('Answer ONLY the latest student message. Use history only to resolve context. Do not dump unrelated information.')
+    parts.append(f'LATEST STUDENT MESSAGE: {user_text}'); parts.append('Answer ONLY the latest student message. Use history only to resolve context. Do not dump unrelated information.')
     return '\n\n'.join(parts)
 
 def request_gemini(user_text,chat_id,model,official_data=''):
@@ -252,7 +309,7 @@ def command_reply(command,chat_id):
     return answers.get(command,'अपना सवाल सीधे लिखें।')
 
 @app.get('/')
-def health(): return jsonify({'ok':True,'service':'Uniraj Information Section','status':'running','ai':'Gemini','model':'gemini-3.5-flash-lite','persistent_memory':bool(DATABASE_URL),'telegram_menu':True,'official_uniraj_lookup':True,'admin_user_dashboard':True,'build':'2026-09-11-persistent-memory-focused'})
+def health(): return jsonify({'ok':True,'service':'Uniraj Information Section','status':'running','ai':'Gemini','model':'gemini-3.5-flash-lite','persistent_memory':bool(DATABASE_URL),'telegram_menu':True,'official_uniraj_lookup':True,'official_pdf_delivery':True,'admin_user_dashboard':True,'build':'2026-09-11-pdf-delivery'})
 
 @app.post('/telegram/webhook')
 def telegram_webhook():
@@ -291,6 +348,10 @@ def telegram_webhook():
             return jsonify({'ok':True})
         try: requests.post(f'{TELEGRAM_API}/sendChatAction',json={'chat_id':chat_id,'action':'typing'},timeout=3)
         except Exception: pass
+        document_reply=try_send_official_document(chat_id,text)
+        if document_reply:
+            save_turn(chat_id,text,document_reply)
+            return jsonify({'ok':True})
         reply=ai_reply(text,chat_id); save_turn(chat_id,text,reply); reply=maybe_add_promotion(chat_id,reply); send_message(chat_id,reply); return jsonify({'ok':True})
     except Exception:
         logging.exception('Telegram webhook failed'); return jsonify({'ok':True})
