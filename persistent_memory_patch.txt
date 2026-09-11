@@ -1,0 +1,1 @@
+The bot now keeps each student's conversation history in the configured DATABASE_URL PostgreSQL database. /reset clears that student's saved conversation. Normal answers use recent saved history to understand follow-up messages while answering only the latest question.
