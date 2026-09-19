@@ -1,49 +1,75 @@
-# Keshav Study Bot
+# Telegram Notes Selling Bot
 
-Telegram + Python bot for Rajasthan University students.
+A Telegram-only Notes/PDF store for university students. There is no PWA, website, student web interface, or external notes store.
 
-## B.Sc. Notes Store
+## Features
 
-The bot now includes a built-in B.Sc. notes catalog for:
-- PCM: Physics, Chemistry, Mathematics
-- PCB: Physics, Chemistry, Biology
-- Semester 1 through Semester 6
-- Complete Notes and Important Questions packages
-- Order creation and order-status storage
-- Telegram PDF delivery can be enabled by attaching a Telegram file_id to a product
-
-Useful commands:
-- /notes — notes store
-- /pcm and /pcb — choose stream
-- /pcm1 ... /pcm6 — direct PCM semester packages
-- /pcb1 ... /pcb6 — direct PCB semester packages
-- /myorders — recent orders
-- /products — admin product list
-
-## Payment
-
-The order layer is ready, but live PhonePe checkout is intentionally not hard-coded until the merchant/payment-gateway account is approved and its official credentials/configuration are available. Never commit API keys, salts, passwords, OTPs, UPI PINs, or other secrets to GitHub.
-
-## Existing Uniraj information features
-
-- Official Uniraj notices/result/admission/syllabus links
-- Official PDF lookup and Telegram delivery
-- Student conversation memory
-- Admin broadcast and user dashboard
+- Student flow entirely through Telegram inline buttons.
+- Courses: B.Sc., B.Com, M.Com, M.Sc, M.A, B.A.
+- B.Sc. streams: PCM and PCB.
+- Semesters 1-6.
+- Subjects are database records, not hard-coded.
+- Admin can add courses, subjects, PDFs and prices from Telegram.
+- PDFs are stored as Telegram file IDs.
+- Telegram Stars (XTR) are used for digital goods.
+- Server validates pre-checkout and only delivers after successful_payment.
+- My Purchases only exposes paid products belonging to that Telegram user.
+- Order records include user, product, price, currency, status, Telegram charge ID, dates and delivery status.
+- Admin order filters, sales statistics, user count and broadcast.
+- Short callback IDs are used to stay within Telegram's 64-byte callback-data limit.
+- Navigation uses edited Telegram messages where practical.
 
 ## Environment variables
 
-Set these as hosting-provider secrets (never commit them):
-- TELEGRAM_BOT_TOKEN
-- GEMINI_API_KEY
-- DATABASE_URL (recommended for persistent bot users)
-- RENDER_EXTERNAL_URL (when using Render webhook deployment)
+Set these as hosting-provider secrets; never commit them:
 
-## Run
+- TELEGRAM_BOT_TOKEN
+- ADMIN_CHAT_ID
+- ADMIN_USERNAME (optional, without @)
+- DATABASE_URL (PostgreSQL for persistent production data)
+- RENDER_EXTERNAL_URL
+- PORT (normally 10000)
+
+## Deploy
 
     pip install -r requirements.txt
     gunicorn bot:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
 
 Webhook endpoint: /telegram/webhook
 
-GitHub stores the source code. A public web host is required to keep the Telegram webhook online; GitHub Pages alone cannot run this Python backend.
+A public HTTPS host is required for the webhook. GitHub stores the source; it does not run the bot by itself.
+
+## Admin
+
+Use /admin from the configured ADMIN_CHAT_ID.
+
+- Users
+- Products / Notes
+- Add Subject
+- Upload PDF
+- Change Price
+- Orders
+- Sales
+- Broadcast
+- Add Course
+- Settings
+
+## Add Subject
+
+Admin -> Add Subject -> Course -> Stream (B.Sc. only) -> Semester -> send subject name.
+
+A new product is created without a PDF initially. Students see Notes unavailable until the PDF is uploaded.
+
+## Upload PDF
+
+Admin -> Upload PDF -> select subject -> send the PDF as a Telegram Document. The bot saves the Telegram file ID.
+
+## Change Price
+
+Admin -> Change Price -> select subject -> send the price in Telegram Stars.
+
+## Payment safety
+
+The bot never sends the PDF merely because Buy Now was pressed or because a pre-checkout request was received. It verifies the pending order, user ID, amount, currency and product availability, answers pre-checkout, then waits for Telegram's successful_payment update before delivery.
+
+For production, use PostgreSQL rather than the local SQLite fallback so products, purchases and sales are not lost when the hosting instance is replaced.
