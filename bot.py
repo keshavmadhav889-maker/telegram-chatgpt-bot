@@ -360,6 +360,12 @@ def telegram_webhook():
             save_turn(chat_id,text,reply); send_message(chat_id,reply); return jsonify({'ok':True})
         if text.startswith('/notes'):
             send_message(chat_id,notes_help()); return jsonify({'ok':True})
+        if text.startswith('/pcm') and len(text.split()[0]) == 5 and text.split()[0][4].isdigit():
+            sem=int(text.split()[0][4:])
+            if 1 <= sem <= 6: send_message(chat_id,notes_for('PCM',sem)); return jsonify({'ok':True})
+        if text.startswith('/pcb') and len(text.split()[0]) == 5 and text.split()[0][4].isdigit():
+            sem=int(text.split()[0][4:])
+            if 1 <= sem <= 6: send_message(chat_id,notes_for('PCB',sem)); return jsonify({'ok':True})
         if text.startswith('/pcm'):
             send_message(chat_id,'📘 B.Sc. PCM\n\nअब /sem1 से /sem6 में से semester चुनें।'); return jsonify({'ok':True})
         if text.startswith('/pcb'):
