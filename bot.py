@@ -194,6 +194,26 @@ def process_admin_state(chat_id, message):
         clear_session(chat_id)
         send_message(chat_id,"✅ Subject successfully added.\n\nअब PDF upload करने के लिए Admin Panel में 📄 Upload PDF चुनें।\nDefault price: 1 Star.", [[btn("💰 Change Price",f"price:{pid}")],[btn("📄 Upload PDF",f"upload:{pid}")], [btn("🔐 Admin Panel","admin")]])
         return True
+    if state=="price":
+        if text.lower()=="/cancel": clear_session(chat_id); send_message(chat_id,"❌ Cancelled."); return True
+        try:
+            price=int(text)
+            if price < 1 or price > 10000: raise ValueError()
+            from notes_store import set_price
+            if set_price(data,price):
+                clear_session(chat_id); send_message(chat_id,f"✅ Price updated: {price} Stars.",[[btn("📄 Upload PDF",f"upload:{data}")],[btn("🔐 Admin Panel","admin")]])
+            else:
+                send_message(chat_id,"❌ Product नहीं मिला।")
+        except ValueError:
+            send_message(chat_id,"❌ Price केवल 1 से 10000 के बीच पूरा number होना चाहिए।")
+        return True
+    if state=="course_code":
+        if text.lower()=="/cancel": clear_session(chat_id); send_message(chat_id,"❌ Cancelled."); return True
+        cid=text.upper().replace(" ","_")[:20]
+        if not cid.isalnum() and "_" not in cid:
+            send_message(chat_id,"❌ Short alphanumeric Course ID भेजें। Example: BTECH"); return True
+        save_session(chat_id,"course_name",cid)
+        send_message(chat_id,"✍️ अब Course का display name भेजें। Example: B.Tech."); return True
     if state=="course_name":
         if text.lower()=="/cancel": clear_session(chat_id); send_message(chat_id,"❌ Cancelled."); return True
         cid=(data.split("|")[0]).upper()[:20]
