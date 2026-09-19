@@ -1,15 +1,19 @@
 services:
   - type: web
-    name: keshav-study-bot
+    name: keshav-notes-selling-bot
     runtime: docker
     plan: free
     healthCheckPath: /
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: GEMINI_API_KEY
+      - key: ADMIN_CHAT_ID
         sync: false
-      - key: GEMINI_MODEL
-        value: gemini-3.8-flash
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: PORT
         value: 10000
+      - key: RENDER_EXTERNAL_URL
+        sync: false
