@@ -9,6 +9,7 @@ import requests
 import psycopg2
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
+from notes_store import notes_help, notes_for, buy_product, recent_orders, list_products, ADMIN_IDS as NOTES_ADMIN_IDS
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
@@ -117,8 +118,8 @@ If an official PDF/page is relevant, include the direct official link and releva
 If official data is unavailable, say so and provide the relevant official link instead of guessing.
 Do NOT add KESHAV MADHAV or Powered by text to normal answers; that credit appears only in /start.
 Verified sources: {UNIRAJ_HOME}; syllabus {UNIRAJ_SYLLABUS}; B.Sc Maths PDF {BSC_MATHS_2025_26_PDF}; notices {UNIRAJ_NOTICES}; result {UNIRAJ_RESULT}; admission {UNIRAJ_ADMISSION}; guess papers {GUESS_1}, {GUESS_2}; result help {RESULT_HELP}.'''
-MENU_COMMANDS=[('updates','📢 Uniraj latest updates'),('exam','📝 Exam information'),('result','🏆 Result portal/help'),('admission','🎓 Admission information'),('syllabus','📘 Official syllabus'),('guess','📚 Free guess papers'),('ask','🤖 Ask Uniraj AI'),('help','ℹ️ Help'),('reset','♻️ Reset chat memory')]
-ADMIN_MENU_COMMANDS=MENU_COMMANDS+[('broadcast','📢 Send message to all users'),('users','👥 User dashboard')]
+MENU_COMMANDS=[('notes','📚 B.Sc. Notes Store'),('pcm','📘 B.Sc. PCM'),('pcb','🧪 B.Sc. PCB'),('sem1','📖 Semester 1'),('sem2','📖 Semester 2'),('sem3','📖 Semester 3'),('sem4','📖 Semester 4'),('sem5','📖 Semester 5'),('sem6','📖 Semester 6'),('myorders','🧾 My orders'),('updates','📢 Uniraj latest updates'),('exam','📝 Exam information'),('result','🏆 Result portal/help'),('admission','🎓 Admission information'),('syllabus','📘 Official syllabus'),('guess','📚 Free guess papers'),('ask','🤖 Ask Uniraj AI'),('help','ℹ️ Help'),('reset','♻️ Reset chat memory')]
+ADMIN_MENU_COMMANDS=MENU_COMMANDS+[('broadcast','📢 Send message to all users'),('users','👥 User dashboard'),('products','🛒 Product list')]
 BROADCAST_WAITING=set()
 
 def send_message(chat_id,text):
@@ -304,6 +305,18 @@ def configure_webhook():
 configure_webhook(); configure_telegram_menu()
 
 def command_reply(command,chat_id):
+    if command=='notes': return notes_help()
+    if command in {'pcm','pcb'}: return f'{command.upper()} selected. अब /sem1 से /sem6 में से semester चुनें।'
+    if command.startswith('sem') and command[3:].isdigit():
+        sem=int(command[3:])
+        if 1 <= sem <= 6: return notes_for('PCM',sem)
+    if command=='myorders':
+        rows=recent_orders(chat_id)
+        if not rows: return '🧾 अभी कोई order नहीं है। /notes से notes package चुनें।'
+        return '🧾 आपके recent orders:\n\n'+'\n'.join(f'{r[0]} • {r[1]} • ₹{r[2]} • {r[3]}' for r in rows)
+    if command=='products' and chat_id in NOTES_ADMIN_IDS:
+        rows=list_products()
+        return '🛒 Products:\n\n'+'\n'.join(f'{r[0]} | {r[3]} | ₹{r[5]} | PDF: {"YES" if r[6] else "NO"}' for r in rows[:100])
     answers={'updates':f'📢 Uniraj Official Notices:\n{UNIRAJ_NOTICES}\n\nLatest information के लिए अपना सवाल सीधे लिखें.','exam':'📝 Exam\n\nअपना course + semester लिखें, जैसे: BSc 3rd semester exam dates','result':f'🏆 Official Result:\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}','admission':f'🎓 Official Admission:\n{UNIRAJ_ADMISSION}','syllabus':f'📘 Official Syllabus Index:\n{UNIRAJ_SYLLABUS}\n\nB.Sc. Maths Group 2025-26 PDF:\n{BSC_MATHS_2025_26_PDF}','guess':f'📚 Free Uniraj Guess Papers:\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}','ask':'🤖 अपना Uniraj सवाल सीधे message में भेजें।','help':'ℹ️ अपना सवाल सीधे लिखें। Bot पिछली बातचीत का context समझकर follow-up सवालों का जवाब देगा।'}
     if command=='reset': reset_history(chat_id); return '♻️ आपकी saved chat memory reset कर दी गई है।'
     return answers.get(command,'अपना सवाल सीधे लिखें।')
@@ -341,6 +354,23 @@ def telegram_webhook():
             BROADCAST_WAITING.discard(chat_id); sent,failed,total=broadcast_message(text); send_message(chat_id,f'📢 Broadcast complete\n\n👥 Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}'); return jsonify({'ok':True})
         if text.startswith('/reset'):
             send_message(chat_id,command_reply('reset',chat_id)); return jsonify({'ok':True})
+        if text.startswith('/buy_'):
+            product_id=text.split()[0][5:]
+            reply=buy_product(chat_id,product_id)
+            save_turn(chat_id,text,reply); send_message(chat_id,reply); return jsonify({'ok':True})
+        if text.startswith('/notes'):
+            send_message(chat_id,notes_help()); return jsonify({'ok':True})
+        if text.startswith('/pcm'):
+            send_message(chat_id,'📘 B.Sc. PCM\n\nअब /sem1 से /sem6 में से semester चुनें।'); return jsonify({'ok':True})
+        if text.startswith('/pcb'):
+            send_message(chat_id,'🧪 B.Sc. PCB\n\nPCB के लिए /sem1 से /sem6 चुनें; बाद में exact PCB package selection भी जोड़ा जा सकता है।'); return jsonify({'ok':True})
+        if text.startswith('/sem') and text[4:5].isdigit():
+            try: sem=int(text.split()[0][4:])
+            except Exception: sem=0
+            if 1 <= sem <= 6:
+                send_message(chat_id,notes_for('PCM',sem)); return jsonify({'ok':True})
+        if text.startswith('/products') and chat_id in NOTES_ADMIN_IDS:
+            send_message(chat_id,command_reply('products',chat_id)); return jsonify({'ok':True})
         if text.startswith('/'):
             command=text.split()[0][1:].split('@')[0].lower()
             if command in {c for c,_ in MENU_COMMANDS}:
