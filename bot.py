@@ -1,396 +1,416 @@
-import os
-import time
-import logging
-import sqlite3
-import tempfile
-from pathlib import Path
-from urllib.parse import urljoin
+import os, json, logging, time
 import requests
-import psycopg2
 from flask import Flask, request, jsonify
-from bs4 import BeautifulSoup
-from notes_store import notes_help, notes_for, buy_product, recent_orders, list_products, ADMIN_IDS as NOTES_ADMIN_IDS
+from notes_store import (
+    register_user, get_courses, get_course, get_subjects, get_product,
+    find_or_create_product, create_order, mark_paid, mark_delivery,
+    my_purchases, admin_products, admin_orders, sales_stats, users_count,
+    all_users, deactivate_user, save_session, get_session, clear_session,
+    add_course
+)
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
-BOT_TOKEN=(os.getenv('TELEGRAM_BOT_TOKEN') or '').strip()
-GEMINI_API_KEY=(os.getenv('GEMINI_API_KEY') or '').strip()
-GEMINI_MODEL=(os.getenv('GEMINI_MODEL') or 'gemini-3.5-flash-lite').strip()
-DATABASE_URL=(os.getenv('DATABASE_URL') or '').strip()
-ADMIN_IDS={8280167872}
-AI_TIMEOUT=18
-MAX_HISTORY=20
-PROMO_EVERY=5
-DB_PATH=(os.getenv('USER_DB_PATH') or '/tmp/users.db').strip()
-if not BOT_TOKEN: raise RuntimeError('TELEGRAM_BOT_TOKEN missing hai')
-if not GEMINI_API_KEY: logging.warning('GEMINI_API_KEY missing hai')
-if DATABASE_URL: logging.info('Persistent PostgreSQL database configured')
-else: logging.warning('DATABASE_URL missing: using temporary SQLite memory')
-TELEGRAM_API=f'https://api.telegram.org/bot{BOT_TOKEN}'
 
-class PGConnection:
-    def __init__(self,url): self.conn=psycopg2.connect(url,connect_timeout=8)
-    def execute(self,sql,params=()):
-        cur=self.conn.cursor(); cur.execute(sql.replace('?','%s'),params); return cur
-    def commit(self): self.conn.commit()
-    def close(self): self.conn.close()
+BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+ADMIN_CHAT_ID = int((os.getenv("ADMIN_CHAT_ID") or "0").strip() or 0)
+ADMIN_USERNAME = (os.getenv("ADMIN_USERNAME") or "").strip().lstrip("@")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
+RENDER_EXTERNAL_URL = (os.getenv("RENDER_EXTERNAL_URL") or "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN missing hai")
+if not ADMIN_CHAT_ID:
+    logging.warning("ADMIN_CHAT_ID is not configured; admin panel will remain disabled")
 
-def db_connect():
-    if DATABASE_URL:
-        try:
-            conn=PGConnection(DATABASE_URL)
-            conn.execute('CREATE TABLE IF NOT EXISTS users (chat_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, active INTEGER DEFAULT 1, created_at DOUBLE PRECISION, last_seen DOUBLE PRECISION)')
-            conn.execute('CREATE TABLE IF NOT EXISTS conversation_history (id BIGSERIAL PRIMARY KEY, chat_id BIGINT NOT NULL, role TEXT NOT NULL, message TEXT NOT NULL, created_at DOUBLE PRECISION NOT NULL)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_history_chat_id_id ON conversation_history(chat_id,id)')
-            conn.commit(); return conn
-        except Exception: logging.exception('PostgreSQL unavailable; using temporary SQLite')
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+MAX_BROADCAST = 4096
+
+def tg(method, payload=None, timeout=15):
+    r = requests.post(f"{API}/{method}", json=payload or {}, timeout=timeout)
+    data = r.json()
+    if not r.ok or not data.get("ok"):
+        raise RuntimeError(f"Telegram {method} failed: {data}")
+    return data["result"]
+
+def send_message(chat_id, text, keyboard=None):
+    p = {"chat_id": chat_id, "text": str(text)[:4096], "disable_web_page_preview": True}
+    if keyboard is not None:
+        p["reply_markup"] = {"inline_keyboard": keyboard}
+    return tg("sendMessage", p)
+
+def edit_message(chat_id, message_id, text, keyboard=None):
+    p = {"chat_id": chat_id, "message_id": message_id, "text": str(text)[:4096], "disable_web_page_preview": True}
+    if keyboard is not None:
+        p["reply_markup"] = {"inline_keyboard": keyboard}
     try:
-        parent=os.path.dirname(DB_PATH)
-        if parent: os.makedirs(parent,exist_ok=True)
-        conn=sqlite3.connect(DB_PATH,timeout=10)
-    except Exception: conn=sqlite3.connect('/tmp/users.db',timeout=10)
-    conn.execute('CREATE TABLE IF NOT EXISTS users (chat_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, active INTEGER DEFAULT 1, created_at REAL, last_seen REAL)')
-    conn.execute('CREATE TABLE IF NOT EXISTS conversation_history (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, role TEXT NOT NULL, message TEXT NOT NULL, created_at REAL NOT NULL)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_history_chat_id_id ON conversation_history(chat_id,id)')
-    conn.commit(); return conn
+        return tg("editMessageText", p)
+    except Exception as e:
+        if "message is not modified" not in str(e).lower():
+            raise
 
-def register_user(user,chat_id):
+def answer_callback(query_id, text=""):
+    try: tg("answerCallbackQuery", {"callback_query_id": query_id, "text": text[:200]})
+    except Exception: pass
+
+def is_admin(chat_id): return bool(ADMIN_CHAT_ID and int(chat_id) == ADMIN_CHAT_ID)
+
+def btn(text, data): return {"text": text, "callback_data": data}
+def url_btn(text, url): return {"text": text, "url": url}
+
+def admin_contact_button():
+    if ADMIN_USERNAME:
+        return url_btn("📩 Admin को Message करें", f"https://t.me/{ADMIN_USERNAME}")
+    return url_btn("📩 Admin को Message करें", f"tg://user?id={ADMIN_CHAT_ID}")
+
+def nav(back="home"):
+    row = []
+    if back != "none": row.append(btn("⬅️ Back", back))
+    row.append(btn("🏠 Main Menu", "home"))
+    return [row]
+
+def main_menu():
+    return [
+        [btn("🎓 B.Sc.", "c:BSC"), btn("📗 B.Com", "c:BCOM")],
+        [btn("📙 M.Com", "c:MCOM"), btn("🔬 M.Sc", "c:MSC")],
+        [btn("📕 M.A", "c:MA"), btn("📘 B.A", "c:BA")],
+        [btn("🛒 My Purchases", "purchases")],
+    ]
+
+def render_home(chat_id, message_id=None):
+    text = "नमस्ते! 📚\n\nयहाँ आप अपने Course, Semester और Subject के अनुसार Notes/PDF खरीद सकते हैं।\nनीचे अपना Course चुनें।"
+    if message_id: edit_message(chat_id, message_id, text, main_menu())
+    else: send_message(chat_id, text, main_menu())
+
+def render_course(chat_id, message_id, cid):
+    course = get_course(cid)
+    if not course: return render_home(chat_id, message_id)
+    if cid == "BSC":
+        kb = [[btn("🧪 B.Sc. PCM", "s:BSC:PCM")],[btn("🧬 B.Sc. PCB", "s:BSC:PCB")]] + nav("home")
+    else:
+        kb = [[btn(f"📘 {course[1]}", f"s:{cid}:")]] + nav("home")
+    edit_message(chat_id, message_id, f"🎓 {course[1]}\n\nअपना stream/course option चुनें।", kb)
+
+def render_semesters(chat_id, message_id, cid, stream):
+    course = get_course(cid)
+    if not course: return render_home(chat_id, message_id)
+    kb=[]
+    icons=["📘","📗","📕","📙","📒","📔"]
+    for i in range(1,7):
+        kb.append([btn(f"{icons[i-1]} Semester {i}", f"m:{cid}:{stream}:{i}")])
+    kb += nav(f"c:{cid}")
+    edit_message(chat_id, message_id, f"🎓 {course[1]}{(' • '+stream) if stream else ''}\n\nSemester चुनें:", kb)
+
+def render_subjects(chat_id, message_id, cid, stream, sem):
+    course = get_course(cid)
+    rows = get_subjects(cid, stream, sem)
+    kb=[]
+    for pid, subject, price, file_id, active in rows:
+        kb.append([btn(("📚 " if file_id else "📄 ") + subject, f"p:{pid}")])
+    if not rows:
+        text=f"📚 {course[1]}{(' • '+stream) if stream else ''} • Semester {sem}\n\nइस semester में अभी कोई Subject नहीं जोड़ा गया है।"
+    else:
+        text=f"📚 {course[1]}{(' • '+stream) if stream else ''} • Semester {sem}\n\nSubject चुनें:"
+    kb += nav(f"s:{cid}:{stream}")
+    edit_message(chat_id, message_id, text, kb)
+
+def render_product(chat_id, message_id, pid):
+    p=get_product(pid)
+    if not p or not p[7]:
+        edit_message(chat_id,message_id,"❌ यह product उपलब्ध नहीं है।",nav("home")); return
+    course=get_course(p[1]); stream=p[2]; sem=p[3]; subject=p[4]; price=p[5]; file_id=p[6]
+    if not file_id:
+        kb=[[admin_contact_button()]]+nav(f"m:{p[1]}:{stream}:{sem}")
+        text=f"📚 इस Subject के Notes अभी उपलब्ध नहीं हैं।\n\nयदि आपको इस Subject के Notes चाहिए तो आप इस Admin ID पर message कर सकते हैं।"
+    else:
+        kb=[[btn("💳 Buy Now","buy:"+pid)],[admin_contact_button()]]+nav(f"m:{p[1]}:{stream}:{sem}")
+        text=(f"📚 Complete Notes\n\nCourse: {course[1]}\n"
+              f"{('Stream: '+stream+'\\n') if stream else ''}Semester: {sem}\nSubject: {subject}\n\n"
+              f"⭐ Price: {price} Stars\n\nPDF उपलब्ध है।\n\nनीचे Buy Now दबाकर खरीदें।")
+    edit_message(chat_id,message_id,text,kb)
+
+def render_purchases(chat_id, message_id=None):
+    rows=my_purchases(chat_id)
+    if not rows:
+        text="🛒 My Purchases\n\nअभी आपकी कोई खरीदी हुई PDF नहीं है।"
+        kb=nav("home")
+    else:
+        text="🛒 My Purchases\n\nआपकी खरीदी हुई PDFs:"
+        kb=[]
+        for oid,pid,cid,stream,sem,subject,price,paid_at in rows:
+            kb.append([btn(f"📥 {subject} • Sem {sem}", "own:"+pid)])
+        kb += nav("home")
+    if message_id: edit_message(chat_id,message_id,text,kb)
+    else: send_message(chat_id,text,kb)
+
+def render_admin(chat_id, message_id=None):
+    kb=[
+        [btn("👤 Users","a:users"),btn("📚 Products / Notes","a:products")],
+        [btn("➕ Add Subject","a:addsub"),btn("📄 Upload PDF","a:upload")],
+        [btn("💰 Change Price","a:price"),btn("📦 Orders","a:orders")],
+        [btn("📊 Sales","a:sales"),btn("📢 Broadcast","a:broadcast")],
+        [btn("➕ Add Course","a:addcourse"),btn("⚙️ Settings","a:settings")],
+        [btn("🏠 Main Menu","home")],
+    ]
+    text="🔐 Admin Panel\n\nTelegram के अंदर से Notes Store manage करें।"
+    if message_id: edit_message(chat_id,message_id,text,kb)
+    else: send_message(chat_id,text,kb)
+
+def admin_course_buttons(prefix):
+    rows=get_courses(); kb=[]
+    for cid,name in rows: kb.append([btn(name, f"{prefix}:{cid}")])
+    return kb
+
+def admin_stream_buttons(prefix,cid):
+    return [[btn("🧪 PCM",f"{prefix}:{cid}:PCM")],[btn("🧬 PCB",f"{prefix}:{cid}:PCB")]]+nav("admin")
+
+def admin_sem_buttons(prefix,cid,stream):
+    return [[btn(f"Semester {i}",f"{prefix}:{cid}:{stream}:{i}")] for i in range(1,7)] + nav("admin")
+
+def product_admin_buttons(action):
+    rows=admin_products(80); kb=[]
+    for pid,cid,stream,sem,subject,price,file_id,active,cname in rows:
+        label=f"{cname}{('/'+stream) if stream else ''} S{sem} • {subject}"
+        kb.append([btn(label[:60],f"{action}:{pid}")])
+    kb += nav("admin")
+    return kb
+
+def process_admin_state(chat_id, message):
+    sess=get_session(chat_id)
+    if not sess: return False
+    state,data=sess
+    text=(message.get("text") or "").strip()
+    if state=="broadcast":
+        if text.lower()=="/cancel": clear_session(chat_id); send_message(chat_id,"❌ Broadcast cancel कर दिया गया।"); return True
+        sent=failed=0
+        for uid in all_users():
+            try: send_message(uid,text[:MAX_BROADCAST]); sent+=1
+            except Exception as e:
+                failed+=1
+                if any(x in str(e).lower() for x in ["blocked","forbidden","chat not found"]): deactivate_user(uid)
+        clear_session(chat_id); send_message(chat_id,f"📢 Broadcast complete\n\n✅ Sent: {sent}\n❌ Failed: {failed}"); return True
+    if state=="subject_name":
+        if text.lower()=="/cancel": clear_session(chat_id); send_message(chat_id,"❌ Cancelled.",[ ]); return True
+        d=json.loads(data); pid=find_or_create_product(d["cid"],d["stream"],d["sem"],text[:150])
+        clear_session(chat_id)
+        send_message(chat_id,"✅ Subject successfully added.\n\nअब PDF upload करने के लिए Admin Panel में 📄 Upload PDF चुनें।\nDefault price: 1 Star.", [[btn("💰 Change Price",f"price:{pid}")],[btn("📄 Upload PDF",f"upload:{pid}")], [btn("🔐 Admin Panel","admin")]])
+        return True
+    if state=="course_name":
+        if text.lower()=="/cancel": clear_session(chat_id); send_message(chat_id,"❌ Cancelled."); return True
+        cid=(data.split("|")[0]).upper()[:20]
+        name=text[:100]
+        if not cid or not name or not add_course(cid,name):
+            send_message(chat_id,"❌ Course add नहीं हुआ। Code unique होना चाहिए। फिर /admin से कोशिश करें।")
+        else: send_message(chat_id,f"✅ Course added: {name}")
+        clear_session(chat_id); return True
+    if state=="pdf_upload":
+        pid=data
+        doc=message.get("document")
+        if not doc:
+            send_message(chat_id,"📄 कृपया PDF को Telegram में Document के रूप में भेजें। /cancel से cancel करें।"); return True
+        name=(doc.get("file_name") or "").lower()
+        if not name.endswith(".pdf"):
+            send_message(chat_id,"❌ केवल PDF document स्वीकार किया जाएगा।"); return True
+        from notes_store import set_file_id
+        set_file_id(pid,doc["file_id"]); clear_session(chat_id)
+        send_message(chat_id,"✅ PDF successfully uploaded.\nअब students यह Notes खरीद सकते हैं।",[[btn("📚 Products","a:products")],[btn("🔐 Admin Panel","admin")]])
+        return True
+    return False
+
+def send_invoice(chat_id,user,pid):
+    order=create_order(chat_id,user,pid)
+    if not order:
+        send_message(chat_id,"❌ यह Notes अभी खरीदने के लिए उपलब्ध नहीं हैं।")
+        return
+    oid,p=order
+    course=get_course(p[1]); desc=f"{course[1]} {p[3]} • {p[4]}"+(f" • {p[2]}" if p[2] else "")
+    tg("sendInvoice",{
+        "chat_id":chat_id,"title":p[4][:32],"description":desc[:255],
+        "payload":"order:"+oid,"currency":"XTR",
+        "prices":[{"label":"Notes PDF","amount":int(p[5])}],
+        "start_parameter":"buy_"+p[0]
+    })
+    send_message(chat_id,f"🧾 Order ID: {oid}\n\nTelegram Stars invoice भेज दिया गया है। Payment सफल होने के बाद PDF automatically इसी chat में भेजी जाएगी।")
+
+def handle_precheckout(q):
+    payload=q.get("invoice_payload","")
+    if not payload.startswith("order:"):
+        tg("answerPreCheckoutQuery",{"pre_checkout_query_id":q["id"],"ok":False,"error_message":"Invalid order."}); return
+    oid=payload[6:]
+    from notes_store import db
+    x=db(); r=x.execute("""SELECT chat_id,product_id,price,status FROM orders WHERE order_id=?""",(oid,)).fetchone(); x.close()
+    if not r or int(r[0])!=int(q.get("from",{}).get("id",0)) or r[3]!="PENDING" or int(r[2])!=int(q.get("total_amount",0)) or q.get("currency")!="XTR":
+        tg("answerPreCheckoutQuery",{"pre_checkout_query_id":q["id"],"ok":False,"error_message":"Order verification failed. Please create a new order."}); return
+    p=get_product(r[1])
+    if not p or not p[6]:
+        tg("answerPreCheckoutQuery",{"pre_checkout_query_id":q["id"],"ok":False,"error_message":"PDF is currently unavailable. Please try again later."}); return
+    tg("answerPreCheckoutQuery",{"pre_checkout_query_id":q["id"],"ok":True})
+
+def handle_successful_payment(message):
+    sp=message.get("successful_payment",{}); payload=sp.get("invoice_payload","")
+    if not payload.startswith("order:"): return
+    oid=payload[6:]; chat_id=message["chat"]["id"]
+    from notes_store import db
+    x=db(); r=x.execute("""SELECT chat_id,product_id,price,status FROM orders WHERE order_id=?""",(oid,)).fetchone(); x.close()
+    if not r or int(r[0])!=int(chat_id) or r[3]=="PAID":
+        return
+    if sp.get("currency")!="XTR" or int(sp.get("total_amount",0))!=int(r[2]):
+        return
+    paid=mark_paid(oid,sp.get("telegram_payment_charge_id",""))
+    if not paid: return
+    p=get_product(r[1])
+    if not p or not p[6]:
+        mark_delivery(oid,"FAILED_NO_FILE"); send_message(chat_id,"⚠️ Payment successful है, लेकिन PDF अभी उपलब्ध नहीं है। Admin से संपर्क करें।",[ [admin_contact_button()] ]); return
+    send_message(chat_id,"✅ Payment Successful!\n\n📚 आपके Notes तैयार हैं।\nनीचे आपकी PDF भेजी जा रही है।\n\nधन्यवाद! 📖")
     try:
-        now=time.time(); conn=db_connect(); conn.execute('INSERT INTO users(chat_id,username,first_name,active,created_at,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name,active=1,last_seen=excluded.last_seen',(chat_id,user.get('username',''),user.get('first_name',''),1,now,now)); conn.commit(); conn.close()
-    except Exception: logging.exception('User registration failed')
-
-def save_message(chat_id,role,message):
-    try:
-        conn=db_connect(); conn.execute('INSERT INTO conversation_history(chat_id,role,message,created_at) VALUES(?,?,?,?)',(chat_id,role,str(message),time.time())); conn.commit(); conn.close()
-    except Exception: logging.exception('Conversation memory save failed')
-
-def save_turn(chat_id,user_text,bot_text): save_message(chat_id,'Student',user_text); save_message(chat_id,'Bot',bot_text)
-
-def load_history(chat_id,limit=MAX_HISTORY):
-    try:
-        conn=db_connect(); rows=conn.execute('SELECT role,message FROM conversation_history WHERE chat_id=? ORDER BY id DESC LIMIT ?',(chat_id,limit)).fetchall(); conn.close(); return list(reversed(rows))
-    except Exception: logging.exception('Conversation memory load failed'); return []
-
-def conversation_count(chat_id):
-    try:
-        conn=db_connect(); n=conn.execute("SELECT COUNT(*) FROM conversation_history WHERE chat_id=? AND role='Student'",(chat_id,)).fetchone()[0]; conn.close(); return n
-    except Exception: return 0
-
-def reset_history(chat_id):
-    try:
-        conn=db_connect(); conn.execute('DELETE FROM conversation_history WHERE chat_id=?',(chat_id,)); conn.commit(); conn.close()
-    except Exception: logging.exception('Conversation reset failed')
-
-def get_active_users():
-    conn=db_connect(); rows=conn.execute('SELECT chat_id FROM users WHERE active=1').fetchall(); conn.close(); return [r[0] for r in rows]
-
-def mark_user_inactive(chat_id):
-    try:
-        conn=db_connect(); conn.execute('UPDATE users SET active=0 WHERE chat_id=?',(chat_id,)); conn.commit(); conn.close()
-    except Exception: logging.exception('Could not deactivate user')
-
-def user_count():
-    conn=db_connect(); n=conn.execute('SELECT COUNT(*) FROM users WHERE active=1').fetchone()[0]; conn.close(); return n
-
-def total_user_count():
-    conn=db_connect(); n=conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]; conn.close(); return n
-
-def user_directory(page=1,per_page=25):
-    page=max(1,int(page)); offset=(page-1)*per_page; conn=db_connect(); rows=conn.execute('SELECT chat_id,username,first_name,active,created_at,last_seen FROM users ORDER BY last_seen DESC LIMIT ? OFFSET ?',(per_page,offset)).fetchall(); conn.close(); return rows
-
-UNIRAJ_HOME='https://www.uniraj.ac.in/'
-UNIRAJ_SYLLABUS='https://uniraj.ac.in/index.php?mid=3125'
-UNIRAJ_NOTICES='https://www.uniraj.ac.in/index.php?mid=196'
-UNIRAJ_RESULT='https://result.uniraj.ac.in/'
-UNIRAJ_ADMISSION='https://admissions.uniraj.ac.in/'
-GUESS_1='https://t.me/Uniraj_GuessPapers'
-GUESS_2='https://t.me/Unirajguesspaper'
-RESULT_HELP='https://t.me/Unirajresult499'
-BSC_MATHS_2025_26_PDF='https://uniraj.ac.in/student/syl_N/UP_SYL_2025-26/Maths_UG0803_%28Maths_Group%29%20I%20to%20VI%202025-26%20%20SCiencee.pdf'
-SYSTEM_PROMPT=f'''You are Uniraj Information Section, a professional Hindi-first assistant for Rajasthan University students.
-Answer ONLY the student's latest question. Never dump unrelated information or repeat menu instructions.
-Understand spelling mistakes, short messages and follow-up messages. Use SAVED CONVERSATION HISTORY to resolve what words like 'haan', 'iska', 'uska', 'kab', 'kitne', 'phir' and 'aur batao' refer to.
-For current university information, use only VERIFIED OFFICIAL UNIRAJ SOURCE DATA. Never invent dates, marks, notices, syllabus details or results.
-For exam/current questions, give only the relevant verified answer. Do not add syllabus/result/admission/guess-paper sections unless asked.
-For study questions, directly solve or explain what was asked.
-Be complete but remove filler, repeated introductions and unrelated links.
-If an official PDF/page is relevant, include the direct official link and relevant verified information.
-If official data is unavailable, say so and provide the relevant official link instead of guessing.
-Do NOT add KESHAV MADHAV or Powered by text to normal answers; that credit appears only in /start.
-Verified sources: {UNIRAJ_HOME}; syllabus {UNIRAJ_SYLLABUS}; B.Sc Maths PDF {BSC_MATHS_2025_26_PDF}; notices {UNIRAJ_NOTICES}; result {UNIRAJ_RESULT}; admission {UNIRAJ_ADMISSION}; guess papers {GUESS_1}, {GUESS_2}; result help {RESULT_HELP}.'''
-MENU_COMMANDS=[('notes','📚 B.Sc. Notes Store'),('pcm','📘 B.Sc. PCM'),('pcb','🧪 B.Sc. PCB'),('sem1','📖 Semester 1'),('sem2','📖 Semester 2'),('sem3','📖 Semester 3'),('sem4','📖 Semester 4'),('sem5','📖 Semester 5'),('sem6','📖 Semester 6'),('myorders','🧾 My orders'),('updates','📢 Uniraj latest updates'),('exam','📝 Exam information'),('result','🏆 Result portal/help'),('admission','🎓 Admission information'),('syllabus','📘 Official syllabus'),('guess','📚 Free guess papers'),('ask','🤖 Ask Uniraj AI'),('help','ℹ️ Help'),('reset','♻️ Reset chat memory')]
-ADMIN_MENU_COMMANDS=MENU_COMMANDS+[('broadcast','📢 Send message to all users'),('users','👥 User dashboard'),('products','🛒 Product list')]
-BROADCAST_WAITING=set()
-
-def send_message(chat_id,text):
-    r=requests.post(f'{TELEGRAM_API}/sendMessage',json={'chat_id':chat_id,'text':str(text)[:4096],'disable_web_page_preview':False},timeout=8); r.raise_for_status(); return r.json()
-
-def send_document(chat_id,file_path,caption):
-    with open(file_path,'rb') as fh:
-        r=requests.post(f'{TELEGRAM_API}/sendDocument',data={'chat_id':chat_id,'caption':caption[:1024]},files={'document':('official-uniraj.pdf',fh,'application/pdf')},timeout=35)
-    r.raise_for_status(); return r.json()
-
-def notify_admin_ai_failure(user_text,chat_id,last_error,tried_models):
-    alert='🚨 Gemini AI Failure\n\n'+f'👤 Chat ID: {chat_id}\n❓ Student question:\n{user_text[:2500]}\n\n🤖 Models tried: {", ".join(tried_models)}\n⚠️ Error: {str(last_error)[:1200]}'
-    for admin_id in ADMIN_IDS:
-        try: send_message(admin_id,alert)
-        except Exception: pass
-
-def configure_telegram_menu():
-    try:
-        requests.post(f'{TELEGRAM_API}/setMyCommands',json={'commands':[{'command':c,'description':d} for c,d in MENU_COMMANDS]},timeout=8).raise_for_status()
-        for admin_id in ADMIN_IDS: requests.post(f'{TELEGRAM_API}/setMyCommands',json={'commands':[{'command':c,'description':d} for c,d in ADMIN_MENU_COMMANDS],'scope':{'type':'chat','chat_id':admin_id}},timeout=8).raise_for_status()
-        requests.post(f'{TELEGRAM_API}/setChatMenuButton',json={'menu_button':{'type':'commands'}},timeout=8).raise_for_status()
-    except Exception as exc: logging.warning('Telegram menu setup failed: %s',exc)
-
-def broadcast_message(text):
-    users=get_active_users(); sent=failed=0
-    for chat_id in users:
-        try: send_message(chat_id,text); sent+=1; time.sleep(0.04)
-        except Exception as exc:
-            failed+=1; s=str(exc).lower()
-            if 'blocked' in s or 'chat not found' in s or 'forbidden' in s: mark_user_inactive(chat_id)
-    return sent,failed,len(users)
-
-OFFICIAL_CACHE={}; CACHE_SECONDS=300
-
-def fetch_official(url,timeout=6):
-    now=time.time(); cached=OFFICIAL_CACHE.get(url)
-    if cached and now-cached[0]<CACHE_SECONDS: return cached[1]
-    r=requests.get(url,timeout=timeout,headers={'User-Agent':'UnirajInformationBot/3.0'}); r.raise_for_status(); OFFICIAL_CACHE[url]=(now,r.text); return r.text
-
-def find_official_pdf(user_text):
-    q=' '.join(user_text.lower().split())
-    syllabus_words=['syllabus','सिलेबस','पाठ्यक्रम']
-    notice_words=['notice','नोटिस','notification','circular','परिपत्र','सूचना']
-    exam_words=['exam','examination','परीक्षा','timetable','time table','डेटशीट','date sheet','exam date','admit card','admitcard','प्रवेश पत्र']
-    wants_doc=any(x in q for x in ['pdf','पीडीएफ','document','फाइल','file','send','bhejo','भेजो','download','डाउनलोड','चाहिए','भेज'])
-    wants_kind=any(x in q for x in syllabus_words+notice_words+exam_words)
-    if not (wants_doc or wants_kind): return None
-    if any(x in q for x in syllabus_words):
-        if any(x in q for x in ['math','mathematics','गणित']): return BSC_MATHS_2025_26_PDF,'📘 B.Sc. Mathematics official syllabus 2025-26'
-        page_url=UNIRAJ_SYLLABUS; page_title='Official Uniraj syllabus'
-    elif any(x in q for x in exam_words):
-        page_url='https://uniraj.ac.in/index.php?exid=3&mid=192'; page_title='Official Uniraj examination document'
-    elif any(x in q for x in notice_words):
-        page_url=UNIRAJ_NOTICES; page_title='Official Uniraj notice'
-    else: return None
-    try:
-        html=fetch_official(page_url,timeout=8); soup=BeautifulSoup(html,'html.parser')
-        terms=[w for w in q.split() if len(w)>2 and w not in ['send','bhejo','download','pdf','please','chahiye','की','का','के','में','और','है']]
-        candidates=[]
-        for a in soup.find_all('a',href=True):
-            href=urljoin(page_url,a.get('href','').strip()); title=' '.join(a.stripped_strings).strip(); blob=(title+' '+href).lower()
-            if not href.startswith(('http://','https://')): continue
-            score=(6 if '.pdf' in href.lower() else 0)+sum(2 for t in terms if t in blob)
-            if score>0: candidates.append((score,href,title))
-        candidates.sort(reverse=True,key=lambda x:x[0])
-        if candidates: return candidates[0][1],candidates[0][2] or page_title
-    except Exception as exc: logging.warning('Official PDF search failed: %s',exc)
-    return None
-
-def try_send_official_document(chat_id,user_text):
-    found=find_official_pdf(user_text)
-    if not found: return None
-    url,title=found; path=None
-    try:
-        r=requests.get(url,timeout=25,headers={'User-Agent':'UnirajInformationBot/3.0','Accept':'application/pdf,*/*'}); r.raise_for_status(); content=r.content; ctype=(r.headers.get('content-type') or '').lower()
-        if len(content)<1000 or ('pdf' not in ctype and not content.startswith(b'%PDF')): return None
-        if len(content)>49*1024*1024:
-            send_message(chat_id,f'📄 Official PDF मिली, लेकिन Telegram upload limit के कारण file बहुत बड़ी है।\n\n🔗 {url}'); return 'official pdf link'
-        with tempfile.NamedTemporaryFile(prefix='uniraj_',suffix='.pdf',delete=False) as tmp:
-            tmp.write(content); path=tmp.name
-        send_document(chat_id,path,f'📄 {title}\n\nSource: University of Rajasthan (Uniraj) official website')
-        return 'Official PDF भेज दी गई।'
-    except Exception as exc:
-        logging.warning('Official PDF download/send failed url=%s error=%s',url,exc); return None
-    finally:
-        if path:
-            try: Path(path).unlink(missing_ok=True)
-            except Exception: pass
-
-def quick_reply(text):
-    q=' '.join(text.lower().split())
-    if q in {'guess','guess paper','guess papers','guesspaper','गेस पेपर','गेस पेपर्स'}: return f'📚 Free Uniraj Guess Papers\n\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}'
-    if q in {'result','रिजल्ट','परिणाम'}: return f'🏆 Uniraj Official Result\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}'
-    if q in {'admission','प्रवेश'}: return f'🎓 Uniraj Official Admission\n{UNIRAJ_ADMISSION}'
-    if q in {'syllabus','सिलेबस','पाठ्यक्रम'}: return f'📘 Official Uniraj Syllabus Index:\n{UNIRAJ_SYLLABUS}'
-    if q in {'who made this bot','who made bot','kisne banaya','किसने बनाया'}: return 'यह Uniraj Information Section bot है।'
-    return None
-
-def official_source_for(text):
-    q=text.lower(); syllabus=any(x in q for x in ['syllabus','सिलेबस','पाठ्यक्रम']); current=any(x in q for x in ['latest','today','aaj','current','abhi','update','notice','notification','exam date','exam dates','date','timetable','time table','last date','exam','examination','परीक्षा','आज','अभी','अपडेट','नोटिस','तिथि','अंतिम तिथि']); admission=any(x in q for x in ['admission','प्रवेश'])
-    if syllabus and any(x in q for x in ['math','mathematics','गणित']): return f'VERIFIED OFFICIAL SOURCE:\nB.Sc. Maths Group 2025-26 PDF: {BSC_MATHS_2025_26_PDF}\nSyllabus index: {UNIRAJ_SYLLABUS}'
-    if syllabus:
-        try:
-            soup=BeautifulSoup(fetch_official(UNIRAJ_SYLLABUS),'html.parser'); matches=[]
-            for a in soup.find_all('a',href=True):
-                title=' '.join(a.stripped_strings).strip(); href=a.get('href','')
-                if title and any(w in (title+' '+href).lower() for w in q.split() if len(w)>2): matches.append(f'- {title}: {href}')
-            if matches: return 'VERIFIED OFFICIAL UNIRAJ SYLLABUS PAGE DATA:\n'+'\n'.join(matches[:10])
-        except Exception: pass
-        return f'OFFICIAL SYLLABUS INDEX: {UNIRAJ_SYLLABUS}\nB.Sc Maths official PDF: {BSC_MATHS_2025_26_PDF}'
-    if current:
-        try:
-            soup=BeautifulSoup(fetch_official(UNIRAJ_NOTICES),'html.parser'); data=' '.join(soup.stripped_strings)
-            return f'VERIFIED OFFICIAL UNIRAJ NOTICES PAGE: {UNIRAJ_NOTICES}\nOFFICIAL PAGE TEXT:\n{data[:9000]}'
-        except Exception: return f'OFFICIAL UNIRAJ NOTICES: {UNIRAJ_NOTICES}\nOfficial site temporarily unavailable; do not guess current information.'
-    if admission: return f'VERIFIED OFFICIAL ADMISSION PORTAL: {UNIRAJ_ADMISSION}'
-    return ''
-
-def make_prompt(user_text,chat_id,official_data=''):
-    parts=[f'SYSTEM: {SYSTEM_PROMPT}']; history=load_history(chat_id,MAX_HISTORY)
-    if history: parts.append('SAVED CONVERSATION HISTORY:\n'+'\n'.join(f'{r.upper()}: {m}' for r,m in history))
-    if official_data: parts.append('VERIFIED OFFICIAL UNIRAJ DATA:\n'+official_data)
-    parts.append(f'LATEST STUDENT MESSAGE: {user_text}'); parts.append('Answer ONLY the latest student message. Use history only to resolve context. Do not dump unrelated information.')
-    return '\n\n'.join(parts)
-
-def request_gemini(user_text,chat_id,model,official_data=''):
-    if not GEMINI_API_KEY: raise RuntimeError('Gemini unavailable')
-    url=f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'; payload={'contents':[{'role':'user','parts':[{'text':make_prompt(user_text,chat_id,official_data)}]}],'generationConfig':{'maxOutputTokens':1800,'temperature':0.2}}
-    r=requests.post(url,headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},json=payload,timeout=AI_TIMEOUT)
-    if not r.ok: raise RuntimeError(f'Gemini {model} HTTP {r.status_code}: {r.text[:500]}')
-    data=r.json(); candidates=data.get('candidates',[]); parts=candidates[0].get('content',{}).get('parts',[]) if candidates else []; answer=''.join(p.get('text','') for p in parts if p.get('text')).strip()
-    if not answer: raise RuntimeError('Empty Gemini response')
-    return answer
-
-def is_transient(exc):
-    s=str(exc).lower(); return any(f'http {c}' in s for c in [408,429,500,502,503,504]) or 'timed out' in s or 'timeout' in s
-
-def model_candidates(): return ['gemini-3.5-flash-lite','gemini-3.6-flash','gemini-3.1-flash-lite']
-
-def ai_reply(user_text,chat_id):
-    quick=quick_reply(user_text)
-    if quick: return quick
-    official_data=official_source_for(user_text); models=model_candidates(); last_error=None; tried=[]
-    for index,model in enumerate(models):
-        tried.append(model); attempts=2 if index==0 else 1
-        for attempt in range(attempts):
-            try: return request_gemini(user_text,chat_id,model,official_data)
-            except Exception as exc:
-                last_error=exc
-                if not is_transient(exc) or attempt+1>=attempts: break
-                time.sleep(0.6)
-    notify_admin_ai_failure(user_text,chat_id,last_error,tried)
-    return 'अभी AI service से जवाब नहीं मिल पा रहा है। कृपया थोड़ी देर बाद फिर कोशिश करें।'
-
-def maybe_add_promotion(chat_id,reply):
-    count=conversation_count(chat_id)
-    if count>0 and count%PROMO_EVERY==0: return reply+f'\n\n📚 Free Study Material: {GUESS_1}\n📖 Guess Papers: {GUESS_2}'
-    return reply
-
-def format_time(ts):
-    if not ts: return '-'
-    try: return time.strftime('%d-%m-%Y %H:%M',time.localtime(ts))
-    except Exception: return '-'
-
-def send_user_dashboard(chat_id,page=1):
-    try:
-        total=total_user_count(); active=user_count(); per_page=25; total_pages=max(1,(total+per_page-1)//per_page); page=min(max(1,page),total_pages); rows=user_directory(page,per_page)
-        lines=['📊 ADMIN USER DASHBOARD','','👥 Total students started: '+str(total),'🟢 Currently active records: '+str(active),f'📄 Page: {page}/{total_pages}','','👤 Recent students:']
-        if not rows: lines.append('अभी कोई student record नहीं है।')
-        else:
-            for i,(cid,username,first_name,active_flag,created_at,last_seen) in enumerate(rows,(page-1)*per_page+1): lines.append(f"{i}. {'🟢' if active_flag else '⚪'} {first_name or 'No name'} — {'@'+username if username else 'username नहीं है'}\n   ID: {cid} | Last: {format_time(last_seen)}")
-        if page<total_pages: lines.append(f'\n➡️ अगला page: /users {page+1}')
-        if page>1: lines.append(f'⬅️ पिछला page: /users {page-1}')
-        send_message(chat_id,'\n'.join(lines))
-    except Exception: logging.exception('User dashboard failed'); send_message(chat_id,'📊 ADMIN USER DASHBOARD\n\nDatabase अभी उपलब्ध नहीं है।')
-
-def configure_webhook():
-    render_url=os.getenv('RENDER_EXTERNAL_URL')
-    if not render_url: return
-    try: requests.post(f'{TELEGRAM_API}/setWebhook',json={'url':render_url.rstrip('/')+'/telegram/webhook'},timeout=8).raise_for_status()
-    except Exception as exc: logging.warning('Webhook setup failed: %s',exc)
-
-configure_webhook(); configure_telegram_menu()
-
-def command_reply(command,chat_id):
-    if command=='notes': return notes_help()
-    if command in {'pcm','pcb'}: return f'{command.upper()} selected. अब /sem1 से /sem6 में से semester चुनें।'
-    if command.startswith('sem') and command[3:].isdigit():
-        sem=int(command[3:])
-        if 1 <= sem <= 6: return notes_for('PCM',sem)
-    if command=='myorders':
-        rows=recent_orders(chat_id)
-        if not rows: return '🧾 अभी कोई order नहीं है। /notes से notes package चुनें।'
-        return '🧾 आपके recent orders:\n\n'+'\n'.join(f'{r[0]} • {r[1]} • ₹{r[2]} • {r[3]}' for r in rows)
-    if command=='products' and chat_id in NOTES_ADMIN_IDS:
-        rows=list_products()
-        return '🛒 Products:\n\n'+'\n'.join(f'{r[0]} | {r[3]} | ₹{r[5]} | PDF: {"YES" if r[6] else "NO"}' for r in rows[:100])
-    answers={'updates':f'📢 Uniraj Official Notices:\n{UNIRAJ_NOTICES}\n\nLatest information के लिए अपना सवाल सीधे लिखें.','exam':'📝 Exam\n\nअपना course + semester लिखें, जैसे: BSc 3rd semester exam dates','result':f'🏆 Official Result:\n{UNIRAJ_RESULT}\n\n🆘 Result Help Group:\n{RESULT_HELP}','admission':f'🎓 Official Admission:\n{UNIRAJ_ADMISSION}','syllabus':f'📘 Official Syllabus Index:\n{UNIRAJ_SYLLABUS}\n\nB.Sc. Maths Group 2025-26 PDF:\n{BSC_MATHS_2025_26_PDF}','guess':f'📚 Free Uniraj Guess Papers:\n1️⃣ {GUESS_1}\n2️⃣ {GUESS_2}','ask':'🤖 अपना Uniraj सवाल सीधे message में भेजें।','help':'ℹ️ अपना सवाल सीधे लिखें। Bot पिछली बातचीत का context समझकर follow-up सवालों का जवाब देगा।'}
-    if command=='reset': reset_history(chat_id); return '♻️ आपकी saved chat memory reset कर दी गई है।'
-    return answers.get(command,'अपना सवाल सीधे लिखें।')
-
-@app.get('/')
-def health(): return jsonify({'ok':True,'service':'Uniraj Information Section','status':'running','ai':'Gemini','model':'gemini-3.5-flash-lite','persistent_memory':bool(DATABASE_URL),'telegram_menu':True,'official_uniraj_lookup':True,'official_pdf_delivery':True,'admin_user_dashboard':True,'build':'2026-09-11-pdf-delivery'})
-
-@app.post('/telegram/webhook')
-def telegram_webhook():
-    try:
-        update=request.get_json(silent=True) or {}; message=update.get('message')
-        if not message: return jsonify({'ok':True})
-        user=message.get('from',{});
-        if user.get('is_bot'): return jsonify({'ok':True})
-        chat_id=message.get('chat',{}).get('id'); text=(message.get('text') or '').strip()
-        if not chat_id or not text: return jsonify({'ok':True})
-        register_user(user,chat_id)
-        if text.startswith('/start'):
-            send_message(chat_id,'🎓 Uniraj Information Section में आपका स्वागत है!\n\nRajasthan University से जुड़े syllabus, exam, result, admission, notices और study questions पूछें।\n\n⚡ Powered by KESHAV MADHAV\n\nMenu से सभी options कभी भी खोल सकते हैं।'); return jsonify({'ok':True})
-        if text.startswith('/cancel'):
-            if chat_id in ADMIN_IDS: BROADCAST_WAITING.discard(chat_id); send_message(chat_id,'❌ Broadcast cancel कर दिया गया।')
-            return jsonify({'ok':True})
-        if text.startswith('/broadcast'):
-            if chat_id not in ADMIN_IDS: return jsonify({'ok':True})
-            BROADCAST_WAITING.add(chat_id); send_message(chat_id,f'📢 Broadcast mode ON\n\nयह message सभी active users को भेजा जाएगा।\n👥 Current users: {user_count()}\n\nअब अपना message भेजें।\nCancel के लिए /cancel भेजें।'); return jsonify({'ok':True})
-        if text.startswith('/users'):
-            if chat_id in ADMIN_IDS:
-                parts=text.split(); page=1
-                if len(parts)>1:
-                    try: page=max(1,int(parts[1]))
-                    except ValueError: page=1
-                send_user_dashboard(chat_id,page)
-            return jsonify({'ok':True})
-        if chat_id in ADMIN_IDS and chat_id in BROADCAST_WAITING:
-            BROADCAST_WAITING.discard(chat_id); sent,failed,total=broadcast_message(text); send_message(chat_id,f'📢 Broadcast complete\n\n👥 Total: {total}\n✅ Sent: {sent}\n❌ Failed: {failed}'); return jsonify({'ok':True})
-        if text.startswith('/reset'):
-            send_message(chat_id,command_reply('reset',chat_id)); return jsonify({'ok':True})
-        if text.startswith('/buy_'):
-            product_id=text.split()[0][5:]
-            reply=buy_product(chat_id,product_id)
-            save_turn(chat_id,text,reply); send_message(chat_id,reply); return jsonify({'ok':True})
-        if text.startswith('/notes'):
-            send_message(chat_id,notes_help()); return jsonify({'ok':True})
-        if text.startswith('/pcm') and len(text.split()[0]) == 5 and text.split()[0][4].isdigit():
-            sem=int(text.split()[0][4:])
-            if 1 <= sem <= 6: send_message(chat_id,notes_for('PCM',sem)); return jsonify({'ok':True})
-        if text.startswith('/pcb') and len(text.split()[0]) == 5 and text.split()[0][4].isdigit():
-            sem=int(text.split()[0][4:])
-            if 1 <= sem <= 6: send_message(chat_id,notes_for('PCB',sem)); return jsonify({'ok':True})
-        if text.startswith('/pcm'):
-            send_message(chat_id,'📘 B.Sc. PCM\n\nअब /sem1 से /sem6 में से semester चुनें।'); return jsonify({'ok':True})
-        if text.startswith('/pcb'):
-            send_message(chat_id,'🧪 B.Sc. PCB\n\nPCB के लिए /sem1 से /sem6 चुनें; बाद में exact PCB package selection भी जोड़ा जा सकता है।'); return jsonify({'ok':True})
-        if text.startswith('/sem') and text[4:5].isdigit():
-            try: sem=int(text.split()[0][4:])
-            except Exception: sem=0
-            if 1 <= sem <= 6:
-                send_message(chat_id,notes_for('PCM',sem)); return jsonify({'ok':True})
-        if text.startswith('/products') and chat_id in NOTES_ADMIN_IDS:
-            send_message(chat_id,command_reply('products',chat_id)); return jsonify({'ok':True})
-        if text.startswith('/'):
-            command=text.split()[0][1:].split('@')[0].lower()
-            if command in {c for c,_ in MENU_COMMANDS}:
-                reply=command_reply(command,chat_id); save_turn(chat_id,text,reply); send_message(chat_id,reply)
-            return jsonify({'ok':True})
-        try: requests.post(f'{TELEGRAM_API}/sendChatAction',json={'chat_id':chat_id,'action':'typing'},timeout=3)
-        except Exception: pass
-        document_reply=try_send_official_document(chat_id,text)
-        if document_reply:
-            save_turn(chat_id,text,document_reply)
-            return jsonify({'ok':True})
-        reply=ai_reply(text,chat_id); save_turn(chat_id,text,reply); reply=maybe_add_promotion(chat_id,reply); send_message(chat_id,reply); return jsonify({'ok':True})
+        tg("sendDocument",{"chat_id":chat_id,"document":p[6],"caption":f"📚 {p[4]}\nOrder ID: {oid}"})
+        mark_delivery(oid,"SENT")
     except Exception:
-        logging.exception('Telegram webhook failed'); return jsonify({'ok':True})
+        mark_delivery(oid,"FAILED")
+        send_message(chat_id,"⚠️ Payment सुरक्षित रूप से दर्ज हो गया है, लेकिन PDF भेजने में समस्या आई। My Purchases से फिर कोशिश करें।")
 
-if __name__=='__main__':
-    port=int(os.getenv('PORT','10000')); app.run(host='0.0.0.0',port=port)
+def handle_callback(q):
+    chat_id=q["message"]["chat"]["id"]; mid=q["message"]["message_id"]; data=q.get("data","")
+    answer_callback(q["id"])
+    if data=="home": return render_home(chat_id,mid)
+    if data=="purchases": return render_purchases(chat_id,mid)
+    if data=="admin":
+        if is_admin(chat_id): return render_admin(chat_id,mid)
+        return
+    if data.startswith("c:"): return render_course(chat_id,mid,data[2:])
+    if data.startswith("s:"):
+        _,cid,stream=data.split(":",2); return render_semesters(chat_id,mid,cid,stream)
+    if data.startswith("m:"):
+        _,cid,stream,sem=data.split(":",3); return render_subjects(chat_id,mid,cid,stream,int(sem))
+    if data.startswith("p:"): return render_product(chat_id,mid,data[2:])
+    if data.startswith("buy:"):
+        pid=data[4:]; p=get_product(pid)
+        if p and p[6]: send_invoice(chat_id,q["from"],pid)
+        else: render_product(chat_id,mid,pid)
+        return
+    if data.startswith("own:"):
+        pid=data[4:]
+        rows=[r for r in my_purchases(chat_id) if r[1]==pid]
+        p=get_product(pid)
+        if not rows or not p or not p[6]:
+            send_message(chat_id,"❌ यह PDF आपकी purchase list में नहीं है या अभी उपलब्ध नहीं है."); return
+        tg("sendDocument",{"chat_id":chat_id,"document":p[6],"caption":f"📥 {p[4]}\nयह आपकी purchased PDF है।"}); return
+
+    if not is_admin(chat_id): return
+    if data=="a:users":
+        send_message(chat_id,f"👤 Users\n\nTotal registered Telegram users: {users_count()}"); return
+    if data=="a:products":
+        rows=admin_products(80); text="📚 Products / Notes\n\n"
+        for pid,cid,stream,sem,sub,price,file_id,active,cname in rows:
+            text+=f"• {cname}{(' • '+stream) if stream else ''} • Sem {sem}\n  {sub} | ⭐ {price} | {'PDF ✅' if file_id else 'PDF ❌'}\n  ID: {pid}\n"
+        send_message(chat_id,text[:4096],product_admin_buttons("edit")); return
+    if data=="a:addsub":
+        send_message(chat_id,"➕ Add Subject\n\nपहले Course चुनें:",admin_course_buttons("as")); return
+    if data.startswith("as:"):
+        parts=data.split(":")
+        if len(parts)==2:
+            cid=parts[1]
+            if cid=="BSC": send_message(chat_id,"Stream चुनें:",admin_stream_buttons("asx",cid))
+            else: send_message(chat_id,"Semester चुनें:",admin_sem_buttons("asy",cid,""))
+        elif len(parts)==3: send_message(chat_id,"Semester चुनें:",admin_sem_buttons("asy",parts[1],parts[2]))
+        return
+    if data.startswith("asx:"):
+        _,cid,stream=data.split(":"); send_message(chat_id,"Semester चुनें:",admin_sem_buttons("asy",cid,stream)); return
+    if data.startswith("asy:"):
+        _,cid,stream,sem=data.split(":"); save_session(chat_id,"subject_name",json.dumps({"cid":cid,"stream":stream,"sem":int(sem)})); send_message(chat_id,"✍️ अब Subject का नाम भेजें।\nExample: Physics\n/cancel"); return
+
+    if data=="a:upload":
+        send_message(chat_id,"📄 Upload PDF\n\nExisting Subject चुनें:",product_admin_buttons("upload")); return
+    if data.startswith("upload:"):
+        pid=data.split(":",1)[1]; p=get_product(pid)
+        if not p: send_message(chat_id,"❌ Product नहीं मिला।"); return
+        save_session(chat_id,"pdf_upload",pid); send_message(chat_id,f"📄 {p[4]} के लिए PDF Document भेजें।\n/cancel"); return
+
+    if data=="a:price":
+        send_message(chat_id,"💰 Price बदलें\n\nSubject चुनें:",product_admin_buttons("price")); return
+    if data.startswith("price:"):
+        pid=data.split(":",1)[1]; p=get_product(pid)
+        if not p: return
+        save_session(chat_id,"price",pid); send_message(chat_id,f"💰 Current price: {p[5]} Stars\n\nनई price केवल पूरा number भेजें।\nExample: 49\n/cancel"); return
+
+    if data=="a:orders":
+        kb=[[btn("🕒 Pending","orders:PENDING"),btn("✅ Paid","orders:PAID")],[btn("❌ Failed","orders:FAILED")],[btn("📅 Today","orders:TODAY")]]+nav("admin")
+        send_message(chat_id,"📦 Orders\n\nFilter चुनें:",kb); return
+    if data.startswith("orders:"):
+        filt=data.split(":")[1]; day=None; status=None
+        if filt in ("PENDING","PAID","FAILED"): status=filt
+        if filt=="TODAY":
+            t=time.localtime(); start=time.mktime((t.tm_year,t.tm_mon,t.tm_mday,0,0,0,0,0)); day=(start,start+86400)
+        rows=admin_orders(status,day,60); text=f"📦 Orders • {filt}\n\n"
+        for r in rows: text+=f"{r[0]}\n👤 {r[1]} @{r[2] or '-'}\n📚 {r[4] or ''} S{r[5]} • {r[6]}\n⭐ {r[7]} • {r[8]} • Delivery {r[11]}\n\n"
+        send_message(chat_id,text[:4096],nav("admin")); return
+
+    if data=="a:sales":
+        u,o,p,total,today,month=sales_stats()
+        send_message(chat_id,f"📊 Sales\n\n👥 Total Users: {u}\n📦 Total Orders: {o}\n✅ Paid Orders: {p}\n⭐ Total Sales: {total} Stars\n📅 आज की Sales: {today} Stars\n🗓️ इस महीने की Sales: {month} Stars",nav("admin")); return
+    if data=="a:broadcast":
+        save_session(chat_id,"broadcast",""); send_message(chat_id,f"📢 Broadcast\n\nअब message भेजें। यह {users_count()} registered users को भेजा जाएगा।\n/cancel"); return
+    if data=="a:addcourse":
+        save_session(chat_id,"course_code",""); send_message(chat_id,"➕ New Course\n\nपहले short Course ID भेजें। Example: BTECH\n/cancel"); return
+    if data=="a:settings":
+        send_message(chat_id,f"⚙️ Settings\n\nAdmin ID: {ADMIN_CHAT_ID}\nAdmin username: @{ADMIN_USERNAME or 'not configured'}\nPayment: Telegram Stars (XTR)\nDatabase: {'PostgreSQL' if DATABASE_URL else 'SQLite fallback'}\n\nNo web/PWA interface is used.",nav("admin")); return
+    if data.startswith("edit:"):
+        pid=data[5:]; p=get_product(pid)
+        if p: send_message(chat_id,f"📚 {p[4]}\n⭐ Price: {p[5]} Stars\n📄 PDF: {'Available' if p[6] else 'Not uploaded'}",[[btn("💰 Change Price",f"price:{pid}")],[btn("📄 Upload/Replace PDF",f"upload:{pid}")],[btn("🔐 Admin Panel","admin")]])
+        return
+
+def handle_message(message):
+    chat_id=message["chat"]["id"]; user=message.get("from",{})
+    register_user(user,chat_id)
+    if message.get("successful_payment"): return handle_successful_payment(message)
+    if process_admin_state(chat_id,message): return
+    text=(message.get("text") or "").strip()
+    if message.get("document") and is_admin(chat_id):
+        send_message(chat_id,"❌ पहले Admin Panel → 📄 Upload PDF से Subject चुनें।"); return
+    if text.startswith("/start"):
+        return render_home(chat_id)
+    if text.startswith("/admin"):
+        if is_admin(chat_id): return render_admin(chat_id)
+        return send_message(chat_id,"⛔ Admin access नहीं है।")
+    if text.startswith("/cancel"):
+        clear_session(chat_id); return send_message(chat_id,"❌ Cancelled.")
+    if text.startswith("/purchases") or text.startswith("/my_purchases"):
+        return render_purchases(chat_id)
+    if text.startswith("/notes"):
+        return render_home(chat_id)
+    if text.startswith("/id"):
+        return send_message(chat_id,f"Your Telegram User ID: {chat_id}")
+    send_message(chat_id,"👇 Notes खरीदने के लिए नीचे menu से Course चुनें।",main_menu())
+
+def configure():
+    try:
+        tg("setMyCommands",{"commands":[{"command":"start","description":"Open Notes Store"},{"command":"admin","description":"Admin Panel (admin only)"},{"command":"purchases","description":"My Purchases"}]})
+        if ADMIN_CHAT_ID:
+            tg("setMyCommands",{"commands":[{"command":"start","description":"Open Notes Store"},{"command":"admin","description":"Admin Panel"},{"command":"purchases","description":"My Purchases"}],"scope":{"type":"chat","chat_id":ADMIN_CHAT_ID}})
+        if RENDER_EXTERNAL_URL:
+            tg("setWebhook",{"url":RENDER_EXTERNAL_URL.rstrip("/")+"/telegram/webhook","allowed_updates":["message","callback_query","pre_checkout_query"]})
+    except Exception:
+        logging.exception("Telegram configuration failed")
+
+configure()
+
+@app.get("/")
+def health():
+    return jsonify({"ok":True,"service":"Telegram Notes Selling Bot","telegram_only":True,"payments":"Telegram Stars XTR","database":"postgresql" if DATABASE_URL else "sqlite-fallback","admin_configured":bool(ADMIN_CHAT_ID)})
+
+@app.post("/telegram/webhook")
+def webhook():
+    try:
+        update=request.get_json(silent=True) or {}
+        if update.get("pre_checkout_query"):
+            handle_precheckout(update["pre_checkout_query"]); return jsonify({"ok":True})
+        if update.get("callback_query"):
+            handle_callback(update["callback_query"]); return jsonify({"ok":True})
+        if update.get("message"):
+            handle_message(update["message"])
+        return jsonify({"ok":True})
+    except Exception:
+        logging.exception("Webhook error")
+        return jsonify({"ok":True})
+
+if __name__=="__main__":
+    app.run(host="0.0.0.0",port=int(os.getenv("PORT","10000")))
