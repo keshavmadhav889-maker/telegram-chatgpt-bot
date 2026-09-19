@@ -114,6 +114,15 @@ def find_or_create_product(course_id,stream,semester,subject):
                 VALUES(?,?,?,?,?,?,?)""",(pid,course_id,stream or "",int(semester),subject,1,time.time()))
     x.commit(); x.close(); return pid
 
+def set_file_id(product_id,file_id):
+    x=db(); cur=x.execute("UPDATE products SET telegram_file_id=? WHERE product_id=?",(file_id,product_id)); x.commit(); ok=cur.rowcount>0; x.close(); return ok
+
+def set_price(product_id,price):
+    x=db(); cur=x.execute("UPDATE products SET price=? WHERE product_id=?",(int(price),product_id)); x.commit(); ok=cur.rowcount>0; x.close(); return ok
+
+def mark_failed(order_id):
+    x=db(); x.execute("UPDATE orders SET status='FAILED' WHERE order_id=? AND status='PENDING'",(order_id,)); x.commit(); x.close()
+
 def create_order(chat_id,user,product_id):
     p=get_product(product_id)
     if not p or not p[7] or not p[6] or int(p[5]) < 1: return None
