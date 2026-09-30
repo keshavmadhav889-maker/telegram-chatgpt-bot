@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: keshav-notes-selling-bot
+    name: keshav-telegram-bot
     runtime: docker
     plan: free
     healthCheckPath: /
@@ -8,10 +8,6 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: ADMIN_CHAT_ID
-        sync: false
-      - key: ADMIN_USERNAME
-        sync: false
-      - key: DATABASE_URL
         sync: false
       - key: PORT
         value: 10000
