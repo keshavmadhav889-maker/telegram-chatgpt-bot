@@ -54,8 +54,6 @@ def health():
     return jsonify({
         'ok': True,
         'service': 'Telegram Bot',
-        'notes_store': False,
-        'notes_features': False,
         'telegram_only': True
     })
 
@@ -71,19 +69,11 @@ def webhook():
         text = (message.get('text') or '').strip()
 
         if text.startswith('/start'):
-            send_message(
-                chat_id,
-                'नमस्ते! 👋\\n\\nTelegram Bot तैयार है।\\n\\n'
-                'Notes Store से जुड़े पुराने सभी features हटा दिए गए हैं।'
-            )
+            send_message(chat_id, 'नमस्ते! 👋\\n\\nTelegram Bot तैयार है।')
         elif text.startswith('/id'):
             send_message(chat_id, f'Your Telegram User ID: {chat_id}')
         else:
-            send_message(
-                chat_id,
-                'Bot तैयार है।\\n\\n'
-                'अभी कोई Notes/PDF/Payment feature सक्रिय नहीं है।'
-            )
+            send_message(chat_id, 'Bot तैयार है।\\n\\nआपका संदेश प्राप्त हुआ।')
 
         return jsonify({'ok': True})
     except Exception:
