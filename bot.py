@@ -131,6 +131,17 @@ def notify_admin_ai_failure(user_text, chat_id, last_error, tried_models):
 
 def configure_telegram_menu():
     try:
+        # Remove stale command scopes left by the old Notes Store bot.
+        for scope in [
+            {'type': 'default'},
+            {'type': 'all_private_chats'},
+            {'type': 'all_group_chats'},
+            {'type': 'all_chat_administrators'},
+        ]:
+            try:
+                requests.post(f'{TELEGRAM_API}/deleteMyCommands', json={'scope': scope}, timeout=8).raise_for_status()
+            except Exception:
+                logging.exception('Could not clear Telegram command scope: %s', scope)
         commands = [{'command': c, 'description': d} for c, d in MENU_COMMANDS]
         requests.post(f'{TELEGRAM_API}/setMyCommands', json={'commands': commands}, timeout=8).raise_for_status()
         admin_commands = [{'command': c, 'description': d} for c, d in ADMIN_MENU_COMMANDS]
