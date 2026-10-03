@@ -246,6 +246,7 @@ SYLLABUS_SESSIONS = [
     ('ugpg-2024-26', '📚 UG & PG 2024-26 NEW', 'https://uniraj.ac.in/index.php?mid=3125'),
     ('ugpg-2023-25', '📚 UG & PG 2023-25', 'https://uniraj.ac.in/index.php?mid=3104'),
     ('ugpg-2022-23', '📚 UG & PG 2022-23', 'https://uniraj.ac.in/index.php?mid=3103'),
+    ('ugpg-2021-22', '📚 UG & PG 2021-22', 'https://uniraj.ac.in/index.php?mid=3102'),
 ]
 SYLLABUS_PAGE_SIZE = 8
 SYLLABUS_CACHE = {}
