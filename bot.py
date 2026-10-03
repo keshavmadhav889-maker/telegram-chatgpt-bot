@@ -247,7 +247,7 @@ SYLLABUS_SESSIONS = [
 ]
 SYLLABUS_PAGE_SIZE = 8
 SYLLABUS_CACHE = {}
-SYLLABUS_CACHE_SECONDS = 900
+SYLLABUS_CACHE_SECONDS = 3000
 
 def syllabus_session_map():
     return {key: (label, url) for key, label, url in SYLLABUS_SESSIONS}
