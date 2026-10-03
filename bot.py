@@ -32,6 +32,20 @@ def configure():
         {'command': 'start', 'description': 'Open Main Menu'},
         {'command': 'id', 'description': 'Show Telegram User ID'}
     ]
+    # Clear old command lists from common Telegram scopes before setting the new ones.
+    scopes = [
+        {'type': 'default'},
+        {'type': 'all_private_chats'},
+        {'type': 'all_group_chats'},
+        {'type': 'all_chat_administrators'}
+    ]
+    if ADMIN_CHAT_ID:
+        scopes.append({'type': 'chat', 'chat_id': ADMIN_CHAT_ID})
+    for scope in scopes:
+        try:
+            tg('deleteMyCommands', {'scope': scope})
+        except Exception:
+            logging.exception('Could not clear Telegram command scope: %s', scope)
     try:
         tg('setMyCommands', {'commands': commands})
         if ADMIN_CHAT_ID:
@@ -51,11 +65,7 @@ configure()
 
 @app.get('/')
 def health():
-    return jsonify({
-        'ok': True,
-        'service': 'Telegram Bot',
-        'telegram_only': True
-    })
+    return jsonify({'ok': True, 'service': 'Telegram Bot', 'telegram_only': True})
 
 @app.post('/telegram/webhook')
 def webhook():
@@ -69,11 +79,11 @@ def webhook():
         text = (message.get('text') or '').strip()
 
         if text.startswith('/start'):
-            send_message(chat_id, 'नमस्ते! 👋\\n\\nTelegram Bot तैयार है।')
+            send_message(chat_id, 'नमस्ते! 👋\n\nTelegram Bot तैयार है।')
         elif text.startswith('/id'):
             send_message(chat_id, f'Your Telegram User ID: {chat_id}')
         else:
-            send_message(chat_id, 'Bot तैयार है।\\n\\nआपका संदेश प्राप्त हुआ।')
+            send_message(chat_id, 'Bot तैयार है।\n\nआपका संदेश प्राप्त हुआ।')
 
         return jsonify({'ok': True})
     except Exception:
