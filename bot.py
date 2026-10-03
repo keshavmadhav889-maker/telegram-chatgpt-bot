@@ -3,6 +3,8 @@ import time
 import logging
 import sqlite3
 import requests
+import threading
+import hashlib
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -114,7 +116,7 @@ Verified sources: University {UNIRAJ_HOME}; Syllabus {UNIRAJ_SYLLABUS}; B.Sc Mat
 
 # ================= TELEGRAM UI =================
 MENU_COMMANDS = [('updates', '📢 Uniraj latest updates'), ('exam', '📝 Exam information'), ('result', '🏆 Result portal/help'), ('admission', '🎓 Admission information'), ('syllabus', '📘 Official syllabus'), ('guess', '📚 Free guess papers'), ('ask', '🤖 Ask Uniraj AI'), ('help', 'ℹ️ Help'), ('reset', '♻️ Reset chat memory')]
-ADMIN_MENU_COMMANDS = MENU_COMMANDS + [('broadcast', '📢 Send message to all users'), ('users', '👥 User dashboard')]
+ADMIN_MENU_COMMANDS = MENU_COMMANDS + [('broadcast', '📢 Send message to all users'), ('users', '👥 User dashboard'), ('sync_syllabus', '📥 Sync all syllabus PDFs')]
 BROADCAST_WAITING = set()
 
 def send_message(chat_id, text):
@@ -257,7 +259,12 @@ def parse_syllabus_rows(url):
     cached = SYLLABUS_CACHE.get(url)
     if cached and now - cached[0] < SYLLABUS_CACHE_SECONDS:
         return cached[1]
-    html = fetch_official(url, timeout=12)
+    urls = [url]
+    if 'www.' not in url:
+        urls.append(url.replace('https://', 'https://www.'))
+    else:
+        urls.append(url.replace('https://www.', 'https://'))
+    html = fetch_official_with_fallback(urls, timeout=18)
     soup = BeautifulSoup(html, 'html.parser')
     rows = []
     seen = set()
@@ -269,19 +276,14 @@ def parse_syllabus_rows(url):
             values = [' '.join(c.stripped_strings).strip() for c in cells]
             if values[0].lower() in {'s.no.', 's.no', 'no.', 'no'}:
                 continue
-            links = [a.get('href') for a in cells[-1].find_all('a', href=True)]
             pdf_url = ''
-            for href in links:
+            for a in tr.find_all('a', href=True):
+                href = (a.get('href') or '').strip()
                 absolute = urljoin(url, href)
-                if '.pdf' in absolute.lower() or 'download' in absolute.lower():
+                low = absolute.lower()
+                if href and not href.lower().startswith(('javascript:', '#', 'mailto:')) and ('.pdf' in low or 'download' in low):
                     pdf_url = absolute
                     break
-            if not pdf_url:
-                for a in tr.find_all('a', href=True):
-                    absolute = urljoin(url, a.get('href'))
-                    if '.pdf' in absolute.lower():
-                        pdf_url = absolute
-                        break
             if not pdf_url:
                 continue
             programme = values[1] if len(values) > 1 else ''
@@ -295,6 +297,55 @@ def parse_syllabus_rows(url):
             rows.append({'programme': programme, 'discipline': discipline, 'scheme': scheme, 'years': years, 'pdf_url': pdf_url})
     SYLLABUS_CACHE[url] = (now, rows)
     return rows
+
+def cache_syllabus_pdf(pdf_url):
+    path = syllabus_store_path(pdf_url)
+    if os.path.exists(path) and os.path.getsize(path) > 1024:
+        return path
+    response = requests.get(pdf_url, timeout=35, headers={'User-Agent': 'UnirajInformationBot/2.0'}, stream=True)
+    response.raise_for_status()
+    total = int(response.headers.get('Content-Length') or 0)
+    if total and total > 49 * 1024 * 1024:
+        raise RuntimeError('PDF is larger than Telegram upload limit')
+    temp = path + '.part'
+    size = 0
+    with open(temp, 'wb') as fh:
+        for chunk in response.iter_content(1024 * 256):
+            if not chunk:
+                continue
+            size += len(chunk)
+            if size > 49 * 1024 * 1024:
+                raise RuntimeError('PDF is larger than Telegram upload limit')
+            fh.write(chunk)
+    os.replace(temp, path)
+    return path
+
+def sync_all_syllabus_pdfs():
+    if not SYLLABUS_SYNC_LOCK.acquire(blocking=False):
+        return
+    try:
+        SYLLABUS_SYNC_STATUS.update({'running': True, 'done': 0, 'failed': 0, 'total': 0})
+        catalog = []
+        for session_key, label, url in SYLLABUS_SESSIONS:
+            try:
+                rows = parse_syllabus_rows(url)
+                for row in rows:
+                    catalog.append((session_key, label, row['pdf_url']))
+            except Exception as exc:
+                logging.warning('Could not read syllabus session %s: %s', session_key, exc)
+        unique = list(dict.fromkeys(catalog))
+        SYLLABUS_SYNC_STATUS['total'] = len(unique)
+        for _, _, pdf_url in unique:
+            try:
+                cache_syllabus_pdf(pdf_url)
+                SYLLABUS_SYNC_STATUS['done'] += 1
+            except Exception as exc:
+                SYLLABUS_SYNC_STATUS['failed'] += 1
+                logging.warning('Syllabus PDF cache failed: %s', exc)
+            time.sleep(0.05)
+    finally:
+        SYLLABUS_SYNC_STATUS['running'] = False
+        SYLLABUS_SYNC_LOCK.release()
 
 def syllabus_home_keyboard():
     rows = []
@@ -347,19 +398,11 @@ def answer_callback(callback_id, text=''):
         pass
 
 def send_document_from_url(chat_id, pdf_url, caption):
-    response = requests.get(pdf_url, timeout=25, headers={'User-Agent': 'UnirajInformationBot/2.0'}, stream=True)
-    response.raise_for_status()
-    content_length = int(response.headers.get('Content-Length') or 0)
-    if content_length and content_length > 49 * 1024 * 1024:
-        raise RuntimeError('PDF is larger than Telegram bot upload limit')
-    data = response.content
-    if len(data) > 49 * 1024 * 1024:
-        raise RuntimeError('PDF is larger than Telegram bot upload limit')
-    filename = pdf_url.split('/')[-1].split('?')[0] or 'Uniraj-Syllabus.pdf'
-    if not filename.lower().endswith('.pdf'):
-        filename += '.pdf'
-    files = {'document': (filename, data, 'application/pdf')}
-    r = requests.post(f'{TELEGRAM_API}/sendDocument', data={'chat_id': chat_id, 'caption': caption[:1024]}, files=files, timeout=35)
+    path = cache_syllabus_pdf(pdf_url)
+    filename = os.path.basename(path)
+    with open(path, 'rb') as fh:
+        files = {'document': (filename, fh, 'application/pdf')}
+        r = requests.post(f'{TELEGRAM_API}/sendDocument', data={'chat_id': chat_id, 'caption': caption[:1024]}, files=files, timeout=45)
     r.raise_for_status()
     return r.json()
 
@@ -664,6 +707,15 @@ def telegram_webhook():
                         page = 1
                 send_user_dashboard(chat_id, page)
             return jsonify({'ok': True})
+        if text.startswith('/sync_syllabus'):
+            if chat_id not in ADMIN_IDS:
+                return jsonify({'ok': True})
+            if SYLLABUS_SYNC_STATUS.get('running'):
+                send_message(chat_id, f"📥 Syllabus sync चल रही है.\nDone: {SYLLABUS_SYNC_STATUS.get('done', 0)}\nFailed: {SYLLABUS_SYNC_STATUS.get('failed', 0)}\nTotal: {SYLLABUS_SYNC_STATUS.get('total', 0)}")
+            else:
+                threading.Thread(target=sync_all_syllabus_pdfs, daemon=True).start()
+                send_message(chat_id, '📥 Official syllabus sync शुरू कर दी गई है.\n\nसभी available syllabus PDFs local cache में download होंगे.')
+            return jsonify({'ok': True})
         if chat_id in ADMIN_IDS and chat_id in BROADCAST_WAITING:
             BROADCAST_WAITING.discard(chat_id)
             sent, failed, total = broadcast_message(text)
@@ -674,7 +726,14 @@ def telegram_webhook():
             return jsonify({'ok': True})
         if text.startswith('/'):
             command = text.split()[0][1:].split('@')[0].lower()
-            if command in {c for c, _ in MENU_COMMANDS}:
+            if command == 'sync_syllabus':
+                if chat_id in ADMIN_IDS:
+                    if not SYLLABUS_SYNC_STATUS.get('running'):
+                        threading.Thread(target=sync_all_syllabus_pdfs, daemon=True).start()
+                        send_message(chat_id, '📥 Official syllabus sync शुरू कर दी गई है.')
+                    else:
+                        send_message(chat_id, f"📥 Sync चल रही है — {SYLLABUS_SYNC_STATUS.get('done', 0)}/{SYLLABUS_SYNC_STATUS.get('total', 0)}")
+            elif command in {c for c, _ in MENU_COMMANDS}:
                 if command == 'syllabus':
                     syllabus_start(chat_id)
                 else:
