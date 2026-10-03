@@ -5,6 +5,7 @@ import sqlite3
 import requests
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
@@ -233,6 +234,252 @@ def official_source_for(text):
         return f'VERIFIED OFFICIAL ADMISSION PORTAL: {UNIRAJ_ADMISSION}'
     return ''
 
+
+# ================= PROFESSIONAL SYLLABUS =================
+SYLLABUS_SESSIONS = [
+    ('pg-2025-27', '📚 PG 2025-27 NEW', 'https://uniraj.ac.in/index.php?mid=3127'),
+    ('ug-2025-26', '📚 UG NEP 2025-26 NEW', 'https://uniraj.ac.in/index.php?mid=3125'),
+    ('ug-2024-25', '📚 UG NEP 2024-25 NEW', 'https://uniraj.ac.in/index.php?mid=3104'),
+    ('ug-2023-24', '📚 UG NEP 2023-24 NEW', 'https://uniraj.ac.in/index.php?mid=3103'),
+    ('ugpg-2024-26', '📚 UG & PG 2024-26 NEW', 'https://uniraj.ac.in/index.php?mid=3125'),
+    ('ugpg-2023-25', '📚 UG & PG 2023-25', 'https://uniraj.ac.in/index.php?mid=3104'),
+    ('ugpg-2022-23', '📚 UG & PG 2022-23', 'https://uniraj.ac.in/index.php?mid=3103'),
+]
+SYLLABUS_PAGE_SIZE = 8
+SYLLABUS_CACHE = {}
+SYLLABUS_CACHE_SECONDS = 900
+
+def syllabus_session_map():
+    return {key: (label, url) for key, label, url in SYLLABUS_SESSIONS}
+
+def parse_syllabus_rows(url):
+    now = time.time()
+    cached = SYLLABUS_CACHE.get(url)
+    if cached and now - cached[0] < SYLLABUS_CACHE_SECONDS:
+        return cached[1]
+    html = fetch_official(url, timeout=12)
+    soup = BeautifulSoup(html, 'html.parser')
+    rows = []
+    seen = set()
+    for table in soup.find_all('table'):
+        for tr in table.find_all('tr'):
+            cells = tr.find_all(['td', 'th'])
+            if len(cells) < 3:
+                continue
+            values = [' '.join(c.stripped_strings).strip() for c in cells]
+            if values[0].lower() in {'s.no.', 's.no', 'no.', 'no'}:
+                continue
+            links = [a.get('href') for a in cells[-1].find_all('a', href=True)]
+            pdf_url = ''
+            for href in links:
+                absolute = urljoin(url, href)
+                if '.pdf' in absolute.lower() or 'download' in absolute.lower():
+                    pdf_url = absolute
+                    break
+            if not pdf_url:
+                for a in tr.find_all('a', href=True):
+                    absolute = urljoin(url, a.get('href'))
+                    if '.pdf' in absolute.lower():
+                        pdf_url = absolute
+                        break
+            if not pdf_url:
+                continue
+            programme = values[1] if len(values) > 1 else ''
+            discipline = values[2] if len(values) > 2 else ''
+            scheme = values[3] if len(values) > 3 else ''
+            years = values[4] if len(values) > 4 else ''
+            key = (programme, discipline, pdf_url)
+            if not programme or key in seen:
+                continue
+            seen.add(key)
+            rows.append({'programme': programme, 'discipline': discipline, 'scheme': scheme, 'years': years, 'pdf_url': pdf_url})
+    SYLLABUS_CACHE[url] = (now, rows)
+    return rows
+
+def syllabus_home_keyboard():
+    rows = []
+    for i in range(0, len(SYLLABUS_SESSIONS), 2):
+        pair = SYLLABUS_SESSIONS[i:i+2]
+        rows.append([{'text': label, 'callback_data': f'sylsess:{key}'} for key, label, _ in pair])
+    rows.append([{'text': '🏠 Home', 'callback_data': 'sylhome'}])
+    return {'inline_keyboard': rows}
+
+def syllabus_program_keyboard(session_key, page=1):
+    mapping = syllabus_session_map()
+    if session_key not in mapping:
+        return None, None, 1
+    label, url = mapping[session_key]
+    rows = parse_syllabus_rows(url)
+    total_pages = max(1, (len(rows) + SYLLABUS_PAGE_SIZE - 1) // SYLLABUS_PAGE_SIZE)
+    page = min(max(1, page), total_pages)
+    start = (page - 1) * SYLLABUS_PAGE_SIZE
+    buttons = []
+    for idx, row in enumerate(rows[start:start + SYLLABUS_PAGE_SIZE], start + 1):
+        title = row['programme']
+        if row['discipline'] and row['discipline'].lower() not in title.lower():
+            title = f"{title} — {row['discipline']}"
+        title = title.replace('&amp;', '&')
+        if len(title) > 62:
+            title = title[:59] + '...'
+        buttons.append([{'text': f'{idx}. {title}', 'callback_data': f'sylpdf:{session_key}:{idx}'}])
+    nav = []
+    if page > 1:
+        nav.append({'text': '⬅️ Previous', 'callback_data': f'sylpage:{session_key}:{page-1}'})
+    if page < total_pages:
+        nav.append({'text': 'Next ➡️', 'callback_data': f'sylpage:{session_key}:{page+1}'})
+    if nav:
+        buttons.append(nav)
+    buttons.append([{'text': '🔙 Sessions', 'callback_data': 'sylhome'}, {'text': '🏠 Home', 'callback_data': 'home'}])
+    return rows, {'inline_keyboard': buttons}, total_pages
+
+def edit_message(chat_id, message_id, text, reply_markup=None):
+    payload = {'chat_id': chat_id, 'message_id': message_id, 'text': text}
+    if reply_markup is not None:
+        payload['reply_markup'] = reply_markup
+    r = requests.post(f'{TELEGRAM_API}/editMessageText', json=payload, timeout=8)
+    r.raise_for_status()
+    return r.json()
+
+def answer_callback(callback_id, text=''):
+    try:
+        requests.post(f'{TELEGRAM_API}/answerCallbackQuery', json={'callback_query_id': callback_id, 'text': text[:200]}, timeout=5)
+    except Exception:
+        pass
+
+def send_document_from_url(chat_id, pdf_url, caption):
+    response = requests.get(pdf_url, timeout=25, headers={'User-Agent': 'UnirajInformationBot/2.0'}, stream=True)
+    response.raise_for_status()
+    content_length = int(response.headers.get('Content-Length') or 0)
+    if content_length and content_length > 49 * 1024 * 1024:
+        raise RuntimeError('PDF is larger than Telegram bot upload limit')
+    data = response.content
+    if len(data) > 49 * 1024 * 1024:
+        raise RuntimeError('PDF is larger than Telegram bot upload limit')
+    filename = pdf_url.split('/')[-1].split('?')[0] or 'Uniraj-Syllabus.pdf'
+    if not filename.lower().endswith('.pdf'):
+        filename += '.pdf'
+    files = {'document': (filename, data, 'application/pdf')}
+    r = requests.post(f'{TELEGRAM_API}/sendDocument', data={'chat_id': chat_id, 'caption': caption[:1024]}, files=files, timeout=35)
+    r.raise_for_status()
+    return r.json()
+
+def syllabus_start(chat_id, message_id=None):
+    text = '📘 University of Rajasthan — Official Syllabus\n\n📚 Choose an academic session to continue.\n\nOfficial University syllabus PDFs are fetched and sent directly inside Telegram.'
+    if message_id:
+        edit_message(chat_id, message_id, text, syllabus_home_keyboard())
+    else:
+        send_message_with_markup(chat_id, text, syllabus_home_keyboard())
+
+def send_message_with_markup(chat_id, text, reply_markup):
+    r = requests.post(f'{TELEGRAM_API}/sendMessage', json={'chat_id': chat_id, 'text': text, 'reply_markup': reply_markup, 'disable_web_page_preview': True}, timeout=8)
+    r.raise_for_status()
+    return r.json()
+
+def syllabus_session(chat_id, message_id, session_key):
+    mapping = syllabus_session_map()
+    if session_key not in mapping:
+        answer_callback('', 'Session unavailable')
+        return
+    label, url = mapping[session_key]
+    try:
+        rows, markup, total_pages = syllabus_program_keyboard(session_key, 1)
+        if not rows:
+            text = f'📘 University of Rajasthan — Syllabus\n\n{label}\n\n⚠️ इस session में अभी कोई downloadable syllabus entry नहीं मिली।\n\n🔄 बाद में फिर कोशिश करें।'
+        else:
+            text = f'📘 University of Rajasthan — Syllabus\n\n{label}\n\n📚 Records: {len(rows)} • Page 1/{total_pages}\n\nनीचे programme / discipline चुनें।'
+        edit_message(chat_id, message_id, text, markup)
+    except Exception as exc:
+        logging.warning('Syllabus session failed %s: %s', session_key, exc)
+        edit_message(chat_id, message_id, f'📘 University of Rajasthan — Syllabus\n\n{label}\n\n⚠️ Official syllabus list अभी load नहीं हो सकी। कृपया थोड़ी देर बाद फिर कोशिश करें.', syllabus_home_keyboard())
+
+def syllabus_page(chat_id, message_id, session_key, page):
+    mapping = syllabus_session_map()
+    if session_key not in mapping:
+        return
+    label, _ = mapping[session_key]
+    try:
+        rows, markup, total_pages = syllabus_program_keyboard(session_key, page)
+        text = f'📘 University of Rajasthan — Syllabus\n\n{label}\n\n📚 Records: {len(rows)} • Page {page}/{total_pages}\n\nनीचे programme / discipline चुनें।'
+        edit_message(chat_id, message_id, text, markup)
+    except Exception as exc:
+        logging.warning('Syllabus page failed: %s', exc)
+
+def syllabus_send_pdf(chat_id, message_id, session_key, index):
+    mapping = syllabus_session_map()
+    if session_key not in mapping:
+        return
+    label, _ = mapping[session_key]
+    try:
+        rows = parse_syllabus_rows(mapping[session_key][1])
+        idx = int(index) - 1
+        if idx < 0 or idx >= len(rows):
+            send_message(chat_id, '⚠️ यह syllabus entry उपलब्ध नहीं है।')
+            return
+        row = rows[idx]
+        name = row['programme']
+        discipline = row['discipline']
+        scheme = row['scheme']
+        years = row['years']
+        caption = (
+            '📘 University of Rajasthan — Official Syllabus\n\n'
+            f'🎓 Programme: {name[:300]}\n'
+            f'📖 Discipline: {discipline[:200]}\n'
+            f'🗓 Session: {years or label}\n\n'
+            '✅ आपका Official Syllabus PDF भेज दिया गया है।\n'
+            '📄 इसे अभी Telegram में खोलकर पढ़ सकते हैं।\n\n'
+            '⚡ Uniraj Information Section'
+        )
+        try:
+            edit_message(chat_id, message_id, '📥 Official syllabus PDF तैयार किया जा रहा है...\n\n⏳ कृपया एक क्षण प्रतीक्षा करें।')
+        except Exception:
+            pass
+        send_document_from_url(chat_id, row['pdf_url'], caption)
+        try:
+            send_message_with_markup(chat_id, '📚 अगला syllabus चुनें या वापस Sessions पर जाएँ।', {'inline_keyboard': [[{'text': '🔙 Sessions', 'callback_data': 'sylhome'}, {'text': '🏠 Home', 'callback_data': 'home'}]]})
+        except Exception:
+            pass
+    except Exception as exc:
+        logging.exception('Syllabus PDF send failed')
+        try:
+            edit_message(chat_id, message_id, '❌ Official PDF भेजने में अभी समस्या आ गई। कृपया थोड़ी देर बाद फिर कोशिश करें।', syllabus_home_keyboard())
+        except Exception:
+            send_message(chat_id, '❌ Official PDF भेजने में अभी समस्या आ गई। कृपया थोड़ी देर बाद फिर कोशिश करें।')
+
+def handle_callback(update):
+    callback = update.get('callback_query') or {}
+    callback_id = callback.get('id', '')
+    data = callback.get('data', '')
+    message = callback.get('message') or {}
+    chat_id = message.get('chat', {}).get('id')
+    message_id = message.get('message_id')
+    if not chat_id or not message_id:
+        answer_callback(callback_id)
+        return
+    register_user(callback.get('from', {}), chat_id)
+    if data == 'sylhome':
+        answer_callback(callback_id)
+        syllabus_start(chat_id, message_id)
+        return
+    if data == 'home':
+        answer_callback(callback_id)
+        edit_message(chat_id, message_id, '🏠 Uniraj Information Section\n\nMenu से Syllabus, Exam, Result, Admission, Guess Papers या AI चुनें।')
+        return
+    if data.startswith('sylsess:'):
+        answer_callback(callback_id, 'Loading official syllabus...')
+        syllabus_session(chat_id, message_id, data.split(':', 1)[1])
+        return
+    if data.startswith('sylpage:'):
+        answer_callback(callback_id)
+        _, session_key, page = data.split(':', 2)
+        syllabus_page(chat_id, message_id, session_key, int(page))
+        return
+    if data.startswith('sylpdf:'):
+        answer_callback(callback_id, 'PDF तैयार हो रही है...')
+        _, session_key, index = data.split(':', 2)
+        syllabus_send_pdf(chat_id, message_id, session_key, int(index))
+        return
+    answer_callback(callback_id)
+
 # ================= GEMINI =================
 def make_prompt(user_text, chat_id, official_data=''):
     parts = [f'SYSTEM: {SYSTEM_PROMPT}']
@@ -377,6 +624,9 @@ def health():
 def telegram_webhook():
     try:
         update = request.get_json(silent=True) or {}
+        if update.get('callback_query'):
+            handle_callback(update)
+            return jsonify({'ok': True})
         message = update.get('message')
         if not message:
             return jsonify({'ok': True})
@@ -425,7 +675,10 @@ def telegram_webhook():
         if text.startswith('/'):
             command = text.split()[0][1:].split('@')[0].lower()
             if command in {c for c, _ in MENU_COMMANDS}:
-                send_message(chat_id, command_reply(command, chat_id))
+                if command == 'syllabus':
+                    syllabus_start(chat_id)
+                else:
+                    send_message(chat_id, command_reply(command, chat_id))
             return jsonify({'ok': True})
         try:
             requests.post(f'{TELEGRAM_API}/sendChatAction', json={'chat_id': chat_id, 'action': 'typing'}, timeout=3)
