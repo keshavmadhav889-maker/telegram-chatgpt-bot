@@ -239,6 +239,7 @@ def official_source_for(text):
 
 # ================= PROFESSIONAL SYLLABUS =================
 SYLLABUS_SESSIONS = [
+    ('ugpg-2021-22', '📚 UG & PG 2021-22 — OFFICIAL 3102', 'https://uniraj.ac.in/index.php?mid=3102'),
     ('pg-2025-27', '📚 PG 2025-27 NEW', 'https://uniraj.ac.in/index.php?mid=3127'),
     ('ug-2025-26', '📚 UG NEP 2025-26 NEW', 'https://uniraj.ac.in/index.php?mid=3125'),
     ('ug-2024-25', '📚 UG NEP 2024-25 NEW', 'https://uniraj.ac.in/index.php?mid=3104'),
@@ -246,107 +247,202 @@ SYLLABUS_SESSIONS = [
     ('ugpg-2024-26', '📚 UG & PG 2024-26 NEW', 'https://uniraj.ac.in/index.php?mid=3125'),
     ('ugpg-2023-25', '📚 UG & PG 2023-25', 'https://uniraj.ac.in/index.php?mid=3104'),
     ('ugpg-2022-23', '📚 UG & PG 2022-23', 'https://uniraj.ac.in/index.php?mid=3103'),
-    ('ugpg-2021-22', '📚 UG & PG 2021-22', 'https://uniraj.ac.in/index.php?mid=3102'),
 ]
 SYLLABUS_PAGE_SIZE = 8
 SYLLABUS_CACHE = {}
 SYLLABUS_CACHE_SECONDS = 3000
+SYLLABUS_STORE = (os.getenv('SYLLABUS_STORE_DIR') or '/tmp/uniraj_syllabus_pdfs').strip()
+SYLLABUS_CATALOG_FILE = os.path.join(SYLLABUS_STORE, 'catalog.json')
+SYLLABUS_SYNC_LOCK = threading.Lock()
+SYLLABUS_SYNC_STATUS = {'running': False, 'done': 0, 'failed': 0, 'total': 0, 'session': 'all'}
+os.makedirs(SYLLABUS_STORE, exist_ok=True)
 
 def syllabus_session_map():
     return {key: (label, url) for key, label, url in SYLLABUS_SESSIONS}
+
+def syllabus_store_path(pdf_url):
+    digest = hashlib.sha256(pdf_url.encode('utf-8')).hexdigest()
+    return os.path.join(SYLLABUS_STORE, digest + '.pdf')
+
+def load_syllabus_catalog():
+    try:
+        with open(SYLLABUS_CATALOG_FILE, 'r', encoding='utf-8') as fh:
+            data = __import__('json').load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_syllabus_catalog(catalog):
+    temp = SYLLABUS_CATALOG_FILE + '.part'
+    with open(temp, 'w', encoding='utf-8') as fh:
+        __import__('json').dump(catalog, fh, ensure_ascii=False, indent=2)
+    os.replace(temp, SYLLABUS_CATALOG_FILE)
+
+def cached_rows_for_url(url):
+    rows = load_syllabus_catalog().get(url)
+    return rows if isinstance(rows, list) else []
+
+def fetch_official_with_fallback(urls, timeout=18):
+    last_error = None
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=timeout, headers={'User-Agent': 'UnirajInformationBot/2.0'})
+            r.raise_for_status()
+            return r.text
+        except Exception as exc:
+            last_error = exc
+            logging.warning('Official syllabus fetch failed %s: %s', url, exc)
+    raise RuntimeError(f'Official syllabus site unavailable: {last_error}')
 
 def parse_syllabus_rows(url):
     now = time.time()
     cached = SYLLABUS_CACHE.get(url)
     if cached and now - cached[0] < SYLLABUS_CACHE_SECONDS:
         return cached[1]
-    urls = [url]
-    if 'www.' not in url:
-        urls.append(url.replace('https://', 'https://www.'))
-    else:
-        urls.append(url.replace('https://www.', 'https://'))
-    html = fetch_official_with_fallback(urls, timeout=18)
-    soup = BeautifulSoup(html, 'html.parser')
-    rows = []
-    seen = set()
-    for table in soup.find_all('table'):
-        for tr in table.find_all('tr'):
-            cells = tr.find_all(['td', 'th'])
-            if len(cells) < 3:
-                continue
-            values = [' '.join(c.stripped_strings).strip() for c in cells]
-            if values[0].lower() in {'s.no.', 's.no', 'no.', 'no'}:
-                continue
-            pdf_url = ''
-            for a in tr.find_all('a', href=True):
-                href = (a.get('href') or '').strip()
-                absolute = urljoin(url, href)
-                low = absolute.lower()
-                if href and not href.lower().startswith(('javascript:', '#', 'mailto:')) and ('.pdf' in low or 'download' in low):
-                    pdf_url = absolute
-                    break
-            if not pdf_url:
-                continue
-            programme = values[1] if len(values) > 1 else ''
-            discipline = values[2] if len(values) > 2 else ''
-            scheme = values[3] if len(values) > 3 else ''
-            years = values[4] if len(values) > 4 else ''
-            key = (programme, discipline, pdf_url)
-            if not programme or key in seen:
-                continue
-            seen.add(key)
-            rows.append({'programme': programme, 'discipline': discipline, 'scheme': scheme, 'years': years, 'pdf_url': pdf_url})
-    SYLLABUS_CACHE[url] = (now, rows)
-    return rows
+    urls = [url, url.replace('https://', 'https://www.') if 'www.' not in url else url.replace('https://www.', 'https://')]
+    try:
+        html = fetch_official_with_fallback(urls, timeout=18)
+        soup = BeautifulSoup(html, 'html.parser')
+        rows, seen = [], set()
+        for table in soup.find_all('table'):
+            for tr in table.find_all('tr'):
+                cells = tr.find_all(['td', 'th'])
+                if len(cells) < 3:
+                    continue
+                values = [' '.join(c.stripped_strings).strip() for c in cells]
+                if values[0].lower() in {'s.no.', 's.no', 'no.', 'no'}:
+                    continue
+                pdf_url = ''
+                for a in tr.find_all('a', href=True):
+                    href = (a.get('href') or '').strip()
+                    absolute = urljoin(url, href)
+                    low = absolute.lower()
+                    if href and not href.lower().startswith(('javascript:', '#', 'mailto:')) and ('.pdf' in low or 'download' in low):
+                        pdf_url = absolute
+                        break
+                if not pdf_url:
+                    continue
+                row = {
+                    'programme': values[1] if len(values) > 1 else '',
+                    'discipline': values[2] if len(values) > 2 else '',
+                    'scheme': values[3] if len(values) > 3 else '',
+                    'years': values[4] if len(values) > 4 else '',
+                    'pdf_url': pdf_url,
+                }
+                key = (row['programme'], row['discipline'], row['pdf_url'])
+                if row['programme'] and key not in seen:
+                    seen.add(key)
+                    rows.append(row)
+        if not rows:
+            raise RuntimeError('No downloadable PDF rows found')
+        SYLLABUS_CACHE[url] = (now, rows)
+        data = load_syllabus_catalog()
+        data[url] = rows
+        save_syllabus_catalog(data)
+        return rows
+    except Exception as exc:
+        offline_rows = cached_rows_for_url(url)
+        if offline_rows:
+            logging.warning('Using cached official syllabus catalog for %s: %s', url, exc)
+            SYLLABUS_CACHE[url] = (now, offline_rows)
+            return offline_rows
+        raise
 
 def cache_syllabus_pdf(pdf_url):
     path = syllabus_store_path(pdf_url)
     if os.path.exists(path) and os.path.getsize(path) > 1024:
         return path
-    response = requests.get(pdf_url, timeout=35, headers={'User-Agent': 'UnirajInformationBot/2.0'}, stream=True)
+    response = requests.get(pdf_url, timeout=45, headers={'User-Agent': 'UnirajInformationBot/2.0'}, stream=True)
     response.raise_for_status()
     total = int(response.headers.get('Content-Length') or 0)
     if total and total > 49 * 1024 * 1024:
         raise RuntimeError('PDF is larger than Telegram upload limit')
     temp = path + '.part'
     size = 0
-    with open(temp, 'wb') as fh:
-        for chunk in response.iter_content(1024 * 256):
-            if not chunk:
-                continue
-            size += len(chunk)
-            if size > 49 * 1024 * 1024:
-                raise RuntimeError('PDF is larger than Telegram upload limit')
-            fh.write(chunk)
-    os.replace(temp, path)
-    return path
+    try:
+        with open(temp, 'wb') as fh:
+            for chunk in response.iter_content(1024 * 256):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > 49 * 1024 * 1024:
+                    raise RuntimeError('PDF is larger than Telegram upload limit')
+                fh.write(chunk)
+        os.replace(temp, path)
+        return path
+    finally:
+        if os.path.exists(temp):
+            try:
+                os.remove(temp)
+            except OSError:
+                pass
 
-def sync_all_syllabus_pdfs():
+def archive_pdf_on_telegram(pdf_path, pdf_url, row):
+    admin_chat_id = next(iter(ADMIN_IDS))
+    caption = f"📚 Uniraj Syllabus Archive\n🎓 {row.get('programme','')[:220]}\n📖 {row.get('discipline','')[:180]}\n🗓 {row.get('years','') or 'Official'}"
+    with open(pdf_path, 'rb') as fh:
+        r = requests.post(
+            f'{TELEGRAM_API}/sendDocument',
+            data={'chat_id': admin_chat_id, 'caption': caption[:1024]},
+            files={'document': (os.path.basename(pdf_path), fh, 'application/pdf')},
+            timeout=60,
+        )
+    r.raise_for_status()
+    return ((r.json().get('result') or {}).get('document') or {}).get('file_id')
+
+def sync_syllabus_sessions(session_keys=None):
     if not SYLLABUS_SYNC_LOCK.acquire(blocking=False):
         return
     try:
-        SYLLABUS_SYNC_STATUS.update({'running': True, 'done': 0, 'failed': 0, 'total': 0})
-        catalog = []
+        wanted = set(session_keys or [key for key, _, _ in SYLLABUS_SESSIONS])
+        SYLLABUS_SYNC_STATUS.update({'running': True, 'done': 0, 'failed': 0, 'total': 0, 'session': ','.join(sorted(wanted))})
+        catalog = load_syllabus_catalog()
+        items = []
         for session_key, label, url in SYLLABUS_SESSIONS:
+            if session_key not in wanted:
+                continue
             try:
                 rows = parse_syllabus_rows(url)
+                catalog[url] = rows
                 for row in rows:
-                    catalog.append((session_key, label, row['pdf_url']))
+                    items.append((url, row))
             except Exception as exc:
                 logging.warning('Could not read syllabus session %s: %s', session_key, exc)
-        unique = list(dict.fromkeys(catalog))
-        SYLLABUS_SYNC_STATUS['total'] = len(unique)
-        for _, _, pdf_url in unique:
+        unique = {}
+        for url, row in items:
+            unique[row['pdf_url']] = (url, row)
+        items = list(unique.values())
+        SYLLABUS_SYNC_STATUS['total'] = len(items)
+        for url, row in items:
+            pdf_url = row['pdf_url']
             try:
-                cache_syllabus_pdf(pdf_url)
+                pdf_path = cache_syllabus_pdf(pdf_url)
+                file_id = row.get('telegram_file_id')
+                if not file_id:
+                    try:
+                        file_id = archive_pdf_on_telegram(pdf_path, pdf_url, row)
+                    except Exception as upload_exc:
+                        logging.warning('Telegram archive upload failed: %s', upload_exc)
+                if file_id:
+                    row['telegram_file_id'] = file_id
                 SYLLABUS_SYNC_STATUS['done'] += 1
             except Exception as exc:
                 SYLLABUS_SYNC_STATUS['failed'] += 1
-                logging.warning('Syllabus PDF cache failed: %s', exc)
-            time.sleep(0.05)
+                logging.warning('Syllabus PDF sync failed %s: %s', pdf_url, exc)
+            try:
+                save_syllabus_catalog(catalog)
+            except Exception:
+                logging.exception('Could not save syllabus catalog')
+        logging.info('Syllabus sync finished: %s', SYLLABUS_SYNC_STATUS)
     finally:
         SYLLABUS_SYNC_STATUS['running'] = False
         SYLLABUS_SYNC_LOCK.release()
+
+def sync_all_syllabus_pdfs():
+    sync_syllabus_sessions()
+
+def sync_2021_22_syllabus_pdfs():
+    sync_syllabus_sessions(['ugpg-2021-22'])
 
 def syllabus_home_keyboard():
     rows = []
@@ -398,17 +494,29 @@ def answer_callback(callback_id, text=''):
     except Exception:
         pass
 
-def send_document_from_url(chat_id, pdf_url, caption):
+def send_document_from_url(chat_id, pdf_url, caption, file_id=None):
+    if not file_id:
+        for rows in load_syllabus_catalog().values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if row.get('pdf_url') == pdf_url and row.get('telegram_file_id'):
+                    file_id = row['telegram_file_id']
+                    break
+            if file_id:
+                break
+    if file_id:
+        r = requests.post(f'{TELEGRAM_API}/sendDocument', json={'chat_id': chat_id, 'document': file_id, 'caption': caption[:1024]}, timeout=20)
+        if r.ok:
+            return r.json()
     path = cache_syllabus_pdf(pdf_url)
-    filename = os.path.basename(path)
     with open(path, 'rb') as fh:
-        files = {'document': (filename, fh, 'application/pdf')}
-        r = requests.post(f'{TELEGRAM_API}/sendDocument', data={'chat_id': chat_id, 'caption': caption[:1024]}, files=files, timeout=45)
+        r = requests.post(f'{TELEGRAM_API}/sendDocument', data={'chat_id': chat_id, 'caption': caption[:1024]}, files={'document': (os.path.basename(path), fh, 'application/pdf')}, timeout=60)
     r.raise_for_status()
     return r.json()
 
 def syllabus_start(chat_id, message_id=None):
-    text = '📘 University of Rajasthan — Official Syllabus\n\n📚 Choose an academic session to continue.\n\nOfficial University syllabus PDFs are fetched and sent directly inside Telegram.'
+    text = '📘 University of Rajasthan — Official Syllabus\n\n📚 Choose an academic session to continue.\n\n⭐ 2021-22 is the official 3102 archive. PDFs are sent directly inside Telegram.'
     if message_id:
         edit_message(chat_id, message_id, text, syllabus_home_keyboard())
     else:
@@ -460,69 +568,27 @@ def syllabus_send_pdf(chat_id, message_id, session_key, index):
             send_message(chat_id, '⚠️ यह syllabus entry उपलब्ध नहीं है।')
             return
         row = rows[idx]
-        name = row['programme']
-        discipline = row['discipline']
-        scheme = row['scheme']
-        years = row['years']
         caption = (
             '📘 University of Rajasthan — Official Syllabus\n\n'
-            f'🎓 Programme: {name[:300]}\n'
-            f'📖 Discipline: {discipline[:200]}\n'
-            f'🗓 Session: {years or label}\n\n'
-            '✅ आपका Official Syllabus PDF भेज दिया गया है।\n'
-            '📄 इसे अभी Telegram में खोलकर पढ़ सकते हैं।\n\n'
+            f"🎓 Programme: {row.get('programme','')[:300]}\n"
+            f"📖 Discipline: {row.get('discipline','')[:200]}\n"
+            f"🗓 Session: {row.get('years') or label}\n\n"
+            '✅ Official syllabus PDF\n'
+            '📄 Telegram में सीधे खोलें।\n\n'
             '⚡ Uniraj Information Section'
         )
         try:
             edit_message(chat_id, message_id, '📥 Official syllabus PDF तैयार किया जा रहा है...\n\n⏳ कृपया एक क्षण प्रतीक्षा करें।')
         except Exception:
             pass
-        send_document_from_url(chat_id, row['pdf_url'], caption)
-        try:
-            send_message_with_markup(chat_id, '📚 अगला syllabus चुनें या वापस Sessions पर जाएँ।', {'inline_keyboard': [[{'text': '🔙 Sessions', 'callback_data': 'sylhome'}, {'text': '🏠 Home', 'callback_data': 'home'}]]})
-        except Exception:
-            pass
-    except Exception as exc:
+        send_document_from_url(chat_id, row['pdf_url'], caption, row.get('telegram_file_id'))
+        send_message_with_markup(chat_id, '📚 अगला syllabus चुनें या वापस Sessions पर जाएँ।', {'inline_keyboard': [[{'text': '🔙 Sessions', 'callback_data': 'sylhome'}, {'text': '🏠 Home', 'callback_data': 'home'}]]})
+    except Exception:
         logging.exception('Syllabus PDF send failed')
         try:
             edit_message(chat_id, message_id, '❌ Official PDF भेजने में अभी समस्या आ गई। कृपया थोड़ी देर बाद फिर कोशिश करें।', syllabus_home_keyboard())
         except Exception:
-            send_message(chat_id, '❌ Official PDF भेजने में अभी समस्या आ गई। कृपया थोड़ी देर बाद फिर कोशिश करें।')
-
-def handle_callback(update):
-    callback = update.get('callback_query') or {}
-    callback_id = callback.get('id', '')
-    data = callback.get('data', '')
-    message = callback.get('message') or {}
-    chat_id = message.get('chat', {}).get('id')
-    message_id = message.get('message_id')
-    if not chat_id or not message_id:
-        answer_callback(callback_id)
-        return
-    register_user(callback.get('from', {}), chat_id)
-    if data == 'sylhome':
-        answer_callback(callback_id)
-        syllabus_start(chat_id, message_id)
-        return
-    if data == 'home':
-        answer_callback(callback_id)
-        edit_message(chat_id, message_id, '🏠 Uniraj Information Section\n\nMenu से Syllabus, Exam, Result, Admission, Guess Papers या AI चुनें।')
-        return
-    if data.startswith('sylsess:'):
-        answer_callback(callback_id, 'Loading official syllabus...')
-        syllabus_session(chat_id, message_id, data.split(':', 1)[1])
-        return
-    if data.startswith('sylpage:'):
-        answer_callback(callback_id)
-        _, session_key, page = data.split(':', 2)
-        syllabus_page(chat_id, message_id, session_key, int(page))
-        return
-    if data.startswith('sylpdf:'):
-        answer_callback(callback_id, 'PDF तैयार हो रही है...')
-        _, session_key, index = data.split(':', 2)
-        syllabus_send_pdf(chat_id, message_id, session_key, int(index))
-        return
-    answer_callback(callback_id)
+            pass
 
 # ================= GEMINI =================
 def make_prompt(user_text, chat_id, official_data=''):
