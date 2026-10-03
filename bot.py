@@ -774,6 +774,15 @@ def telegram_webhook():
                         page = 1
                 send_user_dashboard(chat_id, page)
             return jsonify({'ok': True})
+        if text.startswith('/sync_syllabus_3102'):
+            if chat_id not in ADMIN_IDS:
+                return jsonify({'ok': True})
+            if SYLLABUS_SYNC_STATUS.get('running'):
+                send_message(chat_id, f"📥 3102 sync already running.\nDone: {SYLLABUS_SYNC_STATUS.get('done', 0)}\nFailed: {SYLLABUS_SYNC_STATUS.get('failed', 0)}\nTotal: {SYLLABUS_SYNC_STATUS.get('total', 0)}")
+            else:
+                threading.Thread(target=sync_2021_22_syllabus_pdfs, daemon=True).start()
+                send_message(chat_id, '📥 Official 3102 syllabus archive sync शुरू कर दी गई है.\n\nSite से सभी available PDF पहले download होंगे और Telegram archive में store होंगे.')
+            return jsonify({'ok': True})
         if text.startswith('/sync_syllabus'):
             if chat_id not in ADMIN_IDS:
                 return jsonify({'ok': True})
@@ -781,7 +790,7 @@ def telegram_webhook():
                 send_message(chat_id, f"📥 Syllabus sync चल रही है.\nDone: {SYLLABUS_SYNC_STATUS.get('done', 0)}\nFailed: {SYLLABUS_SYNC_STATUS.get('failed', 0)}\nTotal: {SYLLABUS_SYNC_STATUS.get('total', 0)}")
             else:
                 threading.Thread(target=sync_all_syllabus_pdfs, daemon=True).start()
-                send_message(chat_id, '📥 Official syllabus sync शुरू कर दी गई है.\n\nसभी available syllabus PDFs local cache में download होंगे.')
+                send_message(chat_id, '📥 Official syllabus sync शुरू कर दी गई है.\n\nसभी available syllabus PDFs local cache + Telegram archive में download होंगे.')
             return jsonify({'ok': True})
         if chat_id in ADMIN_IDS and chat_id in BROADCAST_WAITING:
             BROADCAST_WAITING.discard(chat_id)
