@@ -567,15 +567,12 @@ def ai_reply(user_text, chat_id):
     if quick:
         return quick
     official_data = official_source_for(user_text)
-    exam_context = any(x in user_text.lower() for x in ['exam', 'परीक्षा', 'exam date', 'exam dates']) or any('exam' in str(msg).lower() for role, msg in USER_HISTORY.get(chat_id, [])[-4:])
-    if exam_context and 'VERIFIED OFFICIAL UNIRAJ NOTICES PAGE' not in official_data and 'OFFICIAL UNIRAJ NOTICES' not in official_data:
-        official_data = official_source_for(user_text + ' exam')
     models = [GEMINI_MODEL]
     if "gemini-3.1-flash-lite" not in models:
         models.append("gemini-3.1-flash-lite")
     last_error = None
     for model in models:
-        for delay in [0.0, 0.5]:
+        for delay in [0.0, 0.8, 1.8, 3.5]:
             if delay:
                 time.sleep(delay)
             try:
